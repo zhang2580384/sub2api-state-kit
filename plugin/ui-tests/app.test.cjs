@@ -76,7 +76,8 @@ test('validates bounds, renewal horizon, duplicate accounts and model allowlist'
   assert.throws(() => ui.validateConfig(configured({ max_attempts: 33 })), /1–32/);
   assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 61 })), /1–60/);
   assert.throws(() => ui.validateConfig(configured({ cooldown_seconds: 29 })), /30–3600/);
-  assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_minutes: 10 })), /必须小于/);
+  assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 600 })), /必须小于/);
+  assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 30 })));
   const config = configured(); config.accounts.push({ ...config.accounts[0] });
   assert.throws(() => ui.validateConfig(config), /重复/);
   config.accounts.pop(); config.accounts[0].models = ['gpt-6-astra', 'gpt-6-astra'];
@@ -92,6 +93,11 @@ test('validates bounds, renewal horizon, duplicate accounts and model allowlist'
   assert.throws(() => ui.validateConfig(config), /控制字符/);
 });
 
+test('legacy minute renewal horizon migrates to seconds', () => {
+  assert.equal(ui.normalizeConfig({ refresh_before_minutes: 1 }).refresh_before_seconds, 60);
+  assert.equal(ui.normalizeConfig({ refresh_before_seconds: 30, refresh_before_minutes: 1 }).refresh_before_seconds, 30);
+});
+
 test('status tolerates pre-initialization, de-duplicates safe IDs, never labels unknown state as raw text', () => {
   assert.deepEqual(ui.parseStatus({ healthy: true }), { host_ready: false, account_ids: [], account_catalog: [], tickets: [],
     diagnostics_enabled: false, diagnostics_listening: false, diagnostics: [], message: '' });
@@ -101,6 +107,7 @@ test('status tolerates pre-initialization, de-duplicates safe IDs, never labels 
   assert.equal(status.account_catalog[0].name, 'Eight');
   assert.deepEqual(ui.stateLabel('raw-sensitive-ticket-content'), ['未知状态', 'warning']);
   assert.deepEqual(ui.stateLabel('ready'), ['可用', 'success']);
+  assert.deepEqual(ui.stateLabel('renewing'), ['可用 · 续期中', 'success']);
   assert.equal(ui.errorLabel('unknown-raw-ticket'), '操作未完成，请检查账号与插件设置。');
   assert.equal(ui.errorLabel('upstream_rate_limited'), '上游限流（429）');
   assert.throws(() => ui.parseStatus({ status_json: 'broken{' }), /格式不正确/);
@@ -281,6 +288,7 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   h.get('proxy-generator-url').value = 'https://generator.example/gen?zone=custom&sessType=sticky';
   h.get('proxy-generator-blocked-countries').value = 'us, hk, vn';
   h.get('proxy-generator-ttl-minutes').value = '6';
+  h.get('refresh-before-seconds').value = '30';
   await h.get('config-form').fire('input');
   await h.get('save-config').click();
   assert.equal(h.calls.save[0].accounts[0].egress_mode, 'generator');
@@ -288,6 +296,7 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   assert.equal(h.calls.save[0].proxy_generator_url, 'https://generator.example/gen?zone=custom&sessType=sticky');
   assert.deepEqual(h.calls.save[0].proxy_generator_blocked_countries, ['HK', 'US', 'VN']);
   assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
+  assert.equal(h.calls.save[0].refresh_before_seconds, 30);
   h.runtime.stop();
 });
 

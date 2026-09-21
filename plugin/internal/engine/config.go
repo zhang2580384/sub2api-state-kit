@@ -12,10 +12,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "0.3.8"
+const Version = "0.3.9"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -39,7 +40,8 @@ type Config struct {
 	// value is intentionally ignored.
 	DiagnosticLogEnabled   bool            `json:"diagnostic_log_enabled,omitempty"`
 	TTLMinutes             int             `json:"ttl_minutes"`
-	RefreshBeforeMinutes   int             `json:"refresh_before_minutes"`
+	RefreshBeforeSeconds   int             `json:"refresh_before_seconds"`
+	RefreshBeforeMinutes   int             `json:"refresh_before_minutes,omitempty"` // legacy v0.3.8
 	MaxAttempts            int             `json:"max_attempts"`
 	AttemptIntervalSeconds int             `json:"attempt_interval_seconds"`
 	CooldownSeconds        int             `json:"cooldown_seconds"`
@@ -61,7 +63,7 @@ type AccountConfig struct {
 func DefaultConfig() Config {
 	return Config{
 		TTLMinutes:                     60,
-		RefreshBeforeMinutes:           10,
+		RefreshBeforeSeconds:           60,
 		MaxAttempts:                    8,
 		AttemptIntervalSeconds:         10,
 		CooldownSeconds:                300,
@@ -91,6 +93,19 @@ func ParseConfig(raw []byte) (Config, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return c, errors.New("configuration has trailing JSON")
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return c, errors.New("invalid configuration JSON")
+	}
+	_, hasSeconds := fields["refresh_before_seconds"]
+	_, hasMinutes := fields["refresh_before_minutes"]
+	if hasMinutes && !hasSeconds {
+		if c.RefreshBeforeMinutes < 0 || c.RefreshBeforeMinutes > 3599/60 {
+			return c, errors.New("refresh_before_minutes must be nonnegative and less than ttl_minutes")
+		}
+		c.RefreshBeforeSeconds = c.RefreshBeforeMinutes * 60
+	}
+	c.RefreshBeforeMinutes = 0
 	c.UpstreamProxyURL = strings.TrimSpace(c.UpstreamProxyURL)
 	c.DynamicProxyURL = strings.TrimSpace(c.DynamicProxyURL)
 	c.ProxyGeneratorURL = strings.TrimSpace(c.ProxyGeneratorURL)
@@ -100,8 +115,8 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.TTLMinutes < 1 || c.TTLMinutes > 60 {
 		return c, errors.New("ttl_minutes must be 1..60")
 	}
-	if c.RefreshBeforeMinutes < 0 || c.RefreshBeforeMinutes >= c.TTLMinutes {
-		return c, errors.New("refresh_before_minutes must be nonnegative and less than ttl_minutes")
+	if c.RefreshBeforeSeconds < 0 || c.RefreshBeforeSeconds >= c.TTLMinutes*60 {
+		return c, errors.New("refresh_before_seconds must be nonnegative and less than ttl_minutes")
 	}
 	if c.MaxAttempts < 1 || c.MaxAttempts > 32 {
 		return c, errors.New("max_attempts must be 1..32")
@@ -336,15 +351,16 @@ func effectiveTTLMinutes(c Config, a AccountConfig) int {
 	}
 	return c.TTLMinutes
 }
-func effectiveRefreshBeforeMinutes(c Config, a AccountConfig) int {
-	ttl := effectiveTTLMinutes(c, a)
-	if c.RefreshBeforeMinutes < ttl {
-		return c.RefreshBeforeMinutes
+func effectiveRefreshBefore(c Config, a AccountConfig) time.Duration {
+	ttl := time.Duration(effectiveTTLMinutes(c, a)) * time.Minute
+	refresh := time.Duration(c.RefreshBeforeSeconds) * time.Second
+	if refresh < ttl {
+		return refresh
 	}
-	if ttl <= 1 {
+	if ttl <= time.Second {
 		return 0
 	}
-	return ttl - 1
+	return ttl - time.Second
 }
 func jsonText(v any) string { b, _ := json.Marshal(v); return string(b) }
 func targetLength(plan string) int {

@@ -86,7 +86,7 @@ func (e *Engine) schedule() {
 				continue
 			}
 			t := e.tickets[k]
-			if validTicket(t, e.config, a, model, now) && t.ExpiresAt.Sub(now) > time.Duration(effectiveRefreshBeforeMinutes(e.config, a))*time.Minute {
+			if validTicket(t, e.config, a, model, now) && t.ExpiresAt.Sub(now) > effectiveRefreshBefore(e.config, a) {
 				continue
 			}
 			c := e.config

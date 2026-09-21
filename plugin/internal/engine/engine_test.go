@@ -125,10 +125,10 @@ func testStart(id int64) *pluginv1.ForwardRequestStart {
 
 func TestConfigStrictIsolation(t *testing.T) {
 	c, err := ParseConfig([]byte(`{}`))
-	if err != nil || c.Enabled || c.TTLMinutes != 60 || len(c.Accounts) != 0 {
+	if err != nil || c.Enabled || c.TTLMinutes != 60 || c.RefreshBeforeSeconds != 60 || len(c.Accounts) != 0 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
-	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":61}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"max_attempts":33}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
+	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":61}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
 	for _, raw := range bad {
 		if _, err := ParseConfig([]byte(raw)); err == nil {
 			t.Errorf("accepted invalid config %s", raw)
@@ -154,6 +154,32 @@ func TestConfigStrictIsolation(t *testing.T) {
 	}
 	if plugin.Accounts[0].EgressMode != egressModePlugin || plugin.DynamicProxyURL != "" {
 		t.Fatalf("plugin egress configuration not normalized: %+v", plugin)
+	}
+	seconds, err := ParseConfig([]byte(`{"ttl_minutes":5,"refresh_before_seconds":30}`))
+	if err != nil || seconds.RefreshBeforeSeconds != 30 {
+		t.Fatalf("seconds renewal horizon not parsed: %+v %v", seconds, err)
+	}
+	legacy, err := ParseConfig([]byte(`{"ttl_minutes":5,"refresh_before_minutes":1}`))
+	if err != nil || legacy.RefreshBeforeSeconds != 60 || legacy.RefreshBeforeMinutes != 0 {
+		t.Fatalf("legacy renewal horizon not migrated: %+v %v", legacy, err)
+	}
+}
+
+func TestEffectiveRefreshBeforeSeconds(t *testing.T) {
+	c := DefaultConfig()
+	a := AccountConfig{EgressMode: egressModeSub2}
+	if got := effectiveRefreshBefore(c, a); got != 60*time.Second {
+		t.Fatalf("default renewal horizon = %s", got)
+	}
+	c.RefreshBeforeSeconds = 30
+	if got := effectiveRefreshBefore(c, a); got != 30*time.Second {
+		t.Fatalf("configured renewal horizon = %s", got)
+	}
+	c.ProxyGeneratorTTLMinutes = 1
+	a.EgressMode = egressModeGenerator
+	c.RefreshBeforeSeconds = 120
+	if got := effectiveRefreshBefore(c, a); got != 59*time.Second {
+		t.Fatalf("generator renewal horizon was not clamped = %s", got)
 	}
 }
 func TestCollectFixedProxyValidationAndPersistence(t *testing.T) {
@@ -375,6 +401,45 @@ func TestFailedRenewalRetainsTicketAndLateWatchdogCannotRevokeNew(t *testing.T) 
 	if _, err = e.ticketForRequest(context.Background(), testStart(42), "gpt-6-astra"); err == nil {
 		t.Fatal("current rejected ticket still available")
 	}
+}
+
+func TestRenewalKeepsOldTicketAvailable(t *testing.T) {
+	h := testHost(42)
+	release := make(chan struct{})
+	var blockRenewal atomic.Bool
+	pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if blockRenewal.Load() {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set(StateHeader, testState(292))
+		completed(w, "gpt-6-astra")
+	}))
+	defer pool.Close()
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { completed(w, "gpt-6-astra") }))
+	defer business.Close()
+	e := testEngine(t, h, business.URL)
+	apply(t, e, testConfig(pool.URL, 42))
+	waitFor(t, e, "ready")
+	old, err := e.ticketForRequest(context.Background(), testStart(42), "gpt-6-astra")
+	if err != nil || old == nil {
+		t.Fatalf("initial ticket unavailable: %v", err)
+	}
+	blockRenewal.Store(true)
+	e.mu.Lock()
+	current := e.tickets[old.Key]
+	current.ExpiresAt = time.Now().Add(5 * time.Second)
+	e.mu.Unlock()
+	e.notify()
+	waitFor(t, e, "renewing")
+	got, err := e.ticketForRequest(context.Background(), testStart(42), "gpt-6-astra")
+	if err != nil || got == nil || got.Version != old.Version {
+		t.Fatalf("renewal blocked the still-valid ticket: %+v %v", got, err)
+	}
+	close(release)
 }
 func TestApplyCancellationAndPassiveHealth(t *testing.T) {
 	h := testHost(42)

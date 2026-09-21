@@ -60,13 +60,13 @@
           <summary>高级参数 <span class="muted">通常保持默认即可</span></summary>
           <div class="field-grid">
             <div><label for="ttl-minutes">票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="60" value="60" required></div>
-            <div><label for="refresh-before-minutes">提前续期（分钟）</label><input id="refresh-before-minutes" type="number" min="0" max="59" value="10" required></div>
+            <div><label for="refresh-before-seconds">提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="60" required></div>
             <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="30" value="5" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
             <div><label for="attempt-interval-seconds">尝试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>
           </div>
-          <p class="help">有效期是本地使用上限，上游可能提前使票据失效。提前续期必须小于有效期。</p>
+          <p class="help">有效期是本地使用上限，上游可能提前使票据失效。提前续期按秒设置；续期任务运行时旧票据仍然可用，新票据验证成功后才替换。</p>
         </details>
       </fieldset>
 

@@ -7,13 +7,13 @@
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 5,
-    ttl_minutes: 60, refresh_before_minutes: 10, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
-  const NUMBERS = Object.freeze({ ttl_minutes: [1, 60, '票据有效期'], refresh_before_minutes: [0, 59, '提前续期'],
+    ttl_minutes: 60, refresh_before_seconds: 60, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
+  const NUMBERS = Object.freeze({ ttl_minutes: [1, 60, '票据有效期'], refresh_before_seconds: [0, 3599, '提前续期'],
     proxy_generator_ttl_minutes: [1, 30, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
     attempt_interval_seconds: [1, 300, '尝试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
-    ready: ['可用', 'success'], renewing: ['正在续期', ''], cooldown: ['冷却中', 'warning'],
+    ready: ['可用', 'success'], renewing: ['可用 · 续期中', 'success'], cooldown: ['冷却中', 'warning'],
     expired: ['已过期', 'warning'], error: ['获取失败', 'error'] });
   const MODEL_PATTERN = /^gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,94}$/;
   const ACCOUNT_TEXT_LIMITS = Object.freeze({ name: 120, email: 254, expires_at: 64, quota: 80 });
@@ -120,6 +120,9 @@
   function normalizeConfig(input) {
     const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
     const config = Object.assign({}, DEFAULT_CONFIG, { proxy_generator_blocked_countries: DEFAULT_CONFIG.proxy_generator_blocked_countries.slice() });
+    if (source.refresh_before_seconds === undefined && Number.isInteger(source.refresh_before_minutes)) {
+      config.refresh_before_seconds = source.refresh_before_minutes * 60;
+    }
     Object.keys(DEFAULT_CONFIG).forEach(function (key) {
       if (source[key] !== undefined) {
         config[key] = key === 'proxy_generator_blocked_countries' && Array.isArray(source[key]) ? source[key].slice() : source[key];
@@ -148,7 +151,7 @@
         throw new Error(bounds[2] + '须为 ' + bounds[0] + '–' + bounds[1] + ' 之间的整数。');
       }
     });
-    if (config.refresh_before_minutes >= config.ttl_minutes) throw new Error('提前续期必须小于票据有效期。');
+    if (config.refresh_before_seconds >= config.ttl_minutes * 60) throw new Error('提前续期必须小于票据有效期。');
     if (!Array.isArray(config.accounts) || config.accounts.length > 256) throw new Error('最多配置 256 个账号。');
     const ids = new Set();
     let totalModels = 0;
@@ -291,7 +294,7 @@
     let proxies = [];
     let savedUpstreamProxyID = 0;
     let savedUpstreamProxyURL = '';
-    const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_minutes: 'refresh-before-minutes',
+    const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_seconds: 'refresh-before-seconds',
       proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
       max_attempts: 'max-attempts', attempt_interval_seconds: 'attempt-interval-seconds', cooldown_seconds: 'cooldown-seconds' };
     function element(tag, text, className) {

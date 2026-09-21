@@ -5,7 +5,7 @@ Sub2API v0.2.7 的开源 OpenAI OAuth transport 插件，提供逐账号 Pro / T
 请先阅读 [安装与使用说明](../docs/plugin.md)。配置在「插件管理 → STATE Kit → 配置」，不用修改宿主源码。首次安装需在宿主信任本插件的发布者公钥。
 
 - 插件 ID：`io.github.wangyunjeff.sub2api-state-kit`
-- 插件版本：`0.3.8`
+- 插件版本：`0.3.9`
 - 账号显示：账号选择框显示 ID、名称、邮箱；账号资料保存名称、邮箱、到期时间和额度
 - 账号出口：可选 Sub2 原有代理、固定 provider session 粘性代理，或由插件调用代理生成器 API 取得固定出口
 - 生成器过滤：默认阻止香港 `HK`，未知出口地区同样拒绝；生成器出口按较短 TTL 采集、复核并随票据恢复
