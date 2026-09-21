@@ -188,9 +188,13 @@ func (e *Engine) lookupEgressIP(ctx context.Context, proxyURL, upstreamProxyURL 
 	if !e.diagnosticsListening() {
 		return ""
 	}
+	return e.lookupEgressIPRequired(ctx, proxyURL, upstreamProxyURL)
+}
+
+func (e *Engine) lookupEgressIPRequired(ctx context.Context, proxyURL, upstreamProxyURL string) string {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org?format=json", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.egressURL, nil)
 	if err != nil {
 		return ""
 	}

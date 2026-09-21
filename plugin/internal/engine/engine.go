@@ -48,6 +48,8 @@ type Engine struct {
 	semaphore        chan struct{}
 	clients          *clientPool
 	probeURL         string
+	egressURL        string
+	geoURLs          []string
 	tick             time.Duration
 	warmup           time.Duration
 	activeAfter      time.Time
@@ -65,6 +67,8 @@ type ticket struct {
 	Version             string    `json:"version"`
 	ConfigFingerprint   string    `json:"config_fingerprint"`
 	FixedFingerprint    string    `json:"fixed_fingerprint"`
+	GeneratedProxyURL   string    `json:"generated_proxy_url,omitempty"`
+	GeneratedEgressIP   string    `json:"generated_egress_ip,omitempty"`
 	IdentityFingerprint string    `json:"identity_fingerprint"`
 	CapturedAt          time.Time `json:"captured_at"`
 	ExpiresAt           time.Time `json:"expires_at"`
@@ -112,7 +116,18 @@ func New() *Engine {
 func newEngine(host pluginv1.HostServiceClient, probeURL string, tick time.Duration) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	gc, gcancel := context.WithCancel(ctx)
-	e := &Engine{config: DefaultConfig(), ctx: ctx, cancel: cancel, generationCtx: gc, generationCancel: gcancel, wake: make(chan struct{}, 1), done: make(chan struct{}), host: host, hostReady: host != nil, directory: map[int64]bool{}, tickets: map[string]*ticket{}, records: map[string]*jobRecord{}, jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4), clients: newClientPool(), probeURL: probeURL, tick: tick, warmup: 5 * time.Second}
+	e := &Engine{
+		config: DefaultConfig(), ctx: ctx, cancel: cancel, generationCtx: gc, generationCancel: gcancel,
+		wake: make(chan struct{}, 1), done: make(chan struct{}), host: host, hostReady: host != nil,
+		directory: map[int64]bool{}, tickets: map[string]*ticket{}, records: map[string]*jobRecord{},
+		jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4),
+		clients: newClientPool(), probeURL: probeURL, egressURL: "https://api.ipify.org?format=json",
+		geoURLs: []string{
+			"http://ip-api.com/json/{ip}?fields=status,countryCode,query",
+			"https://ipwho.is/{ip}",
+		},
+		tick: tick, warmup: 5 * time.Second,
+	}
 	go e.loop()
 	return e
 }
@@ -281,12 +296,18 @@ func kvKey(id int64, model, fp string) string {
 	return fmt.Sprintf("ticket.%d.%s", id, digest(model, fp))
 }
 func proxyFingerprint(raw string) string { return digest("business-proxy-v1", strings.TrimSpace(raw)) }
-func accountEgress(c Config, a AccountConfig, hostProxyURL string) (string, string, error) {
+func accountEgress(c Config, a AccountConfig, hostProxyURL string, t *ticket) (string, string, error) {
 	if a.EgressMode == egressModePlugin {
 		if a.StickyProxyURL == "" {
 			return "", "", errors.New("account sticky proxy is not configured")
 		}
 		return a.StickyProxyURL, c.UpstreamProxyURL, nil
+	}
+	if a.EgressMode == egressModeGenerator {
+		if t == nil || t.GeneratedProxyURL == "" {
+			return "", c.UpstreamProxyURL, errors.New("generated sticky proxy is unavailable")
+		}
+		return t.GeneratedProxyURL, c.UpstreamProxyURL, nil
 	}
 	if err := validateProxy(hostProxyURL); err != nil {
 		return "", "", errors.New("business proxy invalid")
@@ -319,19 +340,25 @@ func (e *Engine) ticketForRequest(_ context.Context, start *pluginv1.ForwardRequ
 	if !contains(a.Models, model) {
 		return nil, nil
 	}
-	targetProxyURL, upstreamProxyURL, err := accountEgress(e.config, a, start.ProxyUrl)
-	if err != nil {
-		return nil, err
-	}
-	expectedFingerprint := proxyFingerprint(targetProxyURL)
 	k := keyFor(start.AccountId, model)
 	t := e.tickets[k]
+	expectedProxyURL := start.ProxyUrl
+	if a.EgressMode == egressModePlugin {
+		expectedProxyURL = a.StickyProxyURL
+	} else if a.EgressMode == egressModeGenerator && t != nil {
+		expectedProxyURL = t.GeneratedProxyURL
+	}
+	expectedFingerprint := proxyFingerprint(expectedProxyURL)
 	if t != nil && (t.FixedFingerprint != expectedFingerprint || t.IdentityFingerprint != stableHeaders(start.AccountId, start.Headers)) {
 		delete(e.tickets, k)
 		t = nil
 	}
 
 	if !e.closed && e.hostReady && e.directory[start.AccountId] && validTicket(t, e.config, a, model, time.Now()) && t.FixedFingerprint == expectedFingerprint && t.IdentityFingerprint == stableHeaders(start.AccountId, start.Headers) && e.revoked[k] != t.Version {
+		targetProxyURL, upstreamProxyURL, err := accountEgress(e.config, a, start.ProxyUrl, t)
+		if err != nil {
+			return nil, err
+		}
 		return &receipt{
 			State: t.State, Version: t.Version, Key: k, ConfigFingerprint: t.ConfigFingerprint,
 			TargetProxyURL: targetProxyURL, UpstreamProxyURL: upstreamProxyURL, Generation: e.generation,
@@ -341,7 +368,21 @@ func (e *Engine) ticketForRequest(_ context.Context, start *pluginv1.ForwardRequ
 	return nil, errors.New("verified STATE unavailable; acquisition is running in the background")
 }
 func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Time) bool {
-	return t != nil && t.AccountID == a.AccountID && t.Model == model && t.Plan == a.Plan && t.ConfigFingerprint == configFingerprint(c, a, model) && validState(t.State, targetLength(a.Plan)) && t.Version != "" && t.FixedFingerprint != "" && t.IdentityFingerprint != "" && !t.CapturedAt.IsZero() && !t.CapturedAt.After(now.Add(time.Minute)) && t.ExpiresAt.After(t.CapturedAt) && t.ExpiresAt.Sub(t.CapturedAt) <= time.Duration(c.TTLMinutes)*time.Minute && now.Before(t.ExpiresAt)
+	if t == nil || t.AccountID != a.AccountID || t.Model != model || t.Plan != a.Plan ||
+		t.ConfigFingerprint != configFingerprint(c, a, model) || !validState(t.State, targetLength(a.Plan)) ||
+		t.Version == "" || t.FixedFingerprint == "" || t.IdentityFingerprint == "" ||
+		t.CapturedAt.IsZero() || t.CapturedAt.After(now.Add(time.Minute)) ||
+		!t.ExpiresAt.After(t.CapturedAt) || !now.Before(t.ExpiresAt) {
+		return false
+	}
+	if a.EgressMode == egressModeGenerator {
+		if t.GeneratedProxyURL == "" || validateProxy(t.GeneratedProxyURL) != nil {
+			return false
+		}
+	} else if t.GeneratedProxyURL != "" {
+		return false
+	}
+	return t.ExpiresAt.Sub(t.CapturedAt) <= time.Duration(effectiveTTLMinutes(c, a))*time.Minute
 }
 func (e *Engine) invalidate(r *receipt, reason string) {
 	if r == nil || (reason != "model_mismatch" && reason != "state_312") {

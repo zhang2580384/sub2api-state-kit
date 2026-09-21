@@ -651,6 +651,28 @@ func TestNestedHTTPProxyChain(t *testing.T) {
 	if response.StatusCode != http.StatusOK || string(body) != "nested-ok" || secondProxyHits.Load() != 1 {
 		t.Fatalf("nested HTTP chain failed: status=%d body=%q hits=%d", response.StatusCode, body, secondProxyHits.Load())
 	}
+
+	directTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "first-hop-only")
+	}))
+	defer directTarget.Close()
+	firstHopClient, err := makeHTTPClient("", firstProxy.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstHopClient.CloseIdleConnections()
+	response, err = firstHopClient.Get(directTarget.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err = io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != "first-hop-only" {
+		t.Fatalf("first-hop-only transport failed: status=%d body=%q", response.StatusCode, body)
+	}
 }
 
 func TestNestedSOCKS5AuthenticatedFirstProxy(t *testing.T) {

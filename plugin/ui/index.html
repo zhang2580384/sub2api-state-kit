@@ -13,7 +13,7 @@
 <body>
   <main class="shell">
     <header class="page-head">
-      <div><p class="eyebrow">Sub2API 插件</p><h1>STATE Kit 账号管理</h1><p class="muted">每个账号可选择沿用 Sub2 原有代理，或由插件使用固定会话代理接管出口。</p></div>
+      <div><p class="eyebrow">Sub2API 插件</p><h1>STATE Kit 账号管理</h1><p class="muted">每个账号可选择沿用 Sub2 原有代理、账号粘性代理或插件内置代理生成器接管出口。</p></div>
       <span id="connection-status" class="badge">正在连接宿主</span>
     </header>
 
@@ -32,6 +32,12 @@
           <label for="dynamic-proxy-url">第二层：动态代理地址</label>
           <div class="input-action"><input id="dynamic-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="填写动态代理地址"><button id="toggle-proxy" type="button" class="secondary" aria-controls="dynamic-proxy-url" aria-pressed="false">显示</button></div>
           <p class="help">支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。地址中的 <code>{random}</code> 或 <code>{sid}</code> 在每次尝试时替换为随机会话值。请填写自己的代理，不在此处填写账号 Token。</p>
+          <label for="proxy-generator-url">代理生成器 API</label>
+          <input id="proxy-generator-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://example.com/gen?zone=custom&sessType=sticky">
+          <p class="help">插件通过第一层代理调用此 API，读取返回的 <code>host:port</code>，并在采集、复验和业务转发期间固定使用该出口。</p>
+          <label for="proxy-generator-blocked-countries">生成器阻止国家或地区</label>
+          <input id="proxy-generator-blocked-countries" type="text" autocomplete="off" spellcheck="false" placeholder="HK, CN, RU">
+          <p class="help">填写 ISO 两位国家代码，逗号分隔；香港 <code>HK</code> 始终保留，未知出口地区也会被拒绝并重新生成。</p>
           <p class="help">关闭并保存后停止票据获取与注入；正常请求继续转发。</p>
         </section>
 
@@ -45,7 +51,7 @@
           <p id="account-discovery" class="help">名称、邮箱、到期时间和额度会从账号管理同步；同步不可用时仅显示账号 ID。</p>
           <div class="table-wrap"><table class="accounts-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号资料</th><th scope="col">开关</th><th scope="col">出口模式</th><th scope="col">账号粘性代理</th><th scope="col">套餐 / 票据</th><th scope="col">模型</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="accounts-body"></tbody></table></div>
           <p id="accounts-empty" class="empty">尚未添加账号。添加后选择出口模式、套餐和模型，再手动开启。</p>
-          <p class="help">Sub2 原有代理保持宿主行为；插件固定出口使用账号粘性代理完成采集、复验和业务转发。粘性代理须填写服务商固定 session，不接受 <code>{random}</code> 或 <code>{sid}</code>；从聊天复制的 <code>\@</code> 请改成普通 <code>@</code>。若服务商不按 session 保持出口，需要改用服务商 API；SOCKS5 本身不能指定任意出口 IP。</p>
+          <p class="help">Sub2 原有代理保持宿主行为；账号粘性代理模式使用你填写的固定 session；代理生成器模式由插件调用 API 取得固定 <code>host:port</code>。粘性代理不接受 <code>{random}</code> 或 <code>{sid}</code>；从聊天复制的 <code>\@</code> 请改成普通 <code>@</code>。</p>
           <p class="help">Pro 对应 292，Team 对应 332。模型框可从常用模型中选择，也可直接输入自定义名称；多个模型用英文逗号分隔。</p>
           <datalist id="model-options"><option value="gpt-6-astra"></option><option value="gpt-5.6-sol"></option><option value="gpt-5.6-terra"></option><option value="gpt-5.6-luna"></option><option value="gpt-5.5"></option></datalist>
         </section>
@@ -55,6 +61,7 @@
           <div class="field-grid">
             <div><label for="ttl-minutes">票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="60" value="60" required></div>
             <div><label for="refresh-before-minutes">提前续期（分钟）</label><input id="refresh-before-minutes" type="number" min="0" max="59" value="10" required></div>
+            <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="30" value="5" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
             <div><label for="attempt-interval-seconds">尝试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>

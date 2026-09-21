@@ -47,6 +47,24 @@ test('account egress mode can use a fixed provider session without the global dy
   assert.throws(() => ui.validateConfig(config), /选择 Sub2/);
 });
 
+test('generator egress uses the plugin API and always blocks unknown or Hong Kong egress', () => {
+  const config = configured({ enabled: true });
+  config.accounts[0].enabled = true;
+  config.accounts[0].egress_mode = 'generator';
+  config.accounts[0].sticky_proxy_url = '';
+  assert.throws(() => ui.validateConfig(config), /填写代理生成器地址/);
+  config.proxy_generator_url = 'https://generator.example/gen?zone=custom&sessType=sticky';
+  config.proxy_generator_blocked_countries = ['us', 'hk', 'US'];
+  config.dynamic_proxy_url = '';
+  assert.equal(ui.validateConfig(config), config);
+  assert.deepEqual(config.proxy_generator_blocked_countries, ['HK', 'US']);
+  config.proxy_generator_url = 'https://user:pass@generator.example/gen';
+  assert.throws(() => ui.validateConfig(config), /不含认证信息/);
+  config.proxy_generator_url = 'https://generator.example/gen';
+  config.proxy_generator_blocked_countries = ['HKG'];
+  assert.throws(() => ui.validateConfig(config), /ISO 两位代码/);
+});
+
 test('account labels omit empty fields instead of showing placeholder text', () => {
   assert.equal(ui.accountOptionLabel(40, {}), '#40');
   assert.equal(ui.accountOptionLabel(40, { name: 'account' }), '#40 · account');
@@ -249,6 +267,27 @@ test('account egress mode and sticky proxy are saved per account', async () => {
   await h.get('save-config').click();
   assert.equal(h.calls.save[0].accounts[0].egress_mode, 'plugin');
   assert.equal(h.calls.save[0].accounts[0].sticky_proxy_url, sticky.value);
+  h.runtime.stop();
+});
+
+test('generator URL, blocked countries and fixed TTL are saved and disable the sticky field', async () => {
+  const h = uiHarness(); await settle();
+  const row = h.get('accounts-body').children[0];
+  const egress = row.children[3].children[0];
+  const sticky = row.children[4].children[0];
+  egress.value = 'generator';
+  await egress.fire('change');
+  assert.equal(sticky.disabled, true);
+  h.get('proxy-generator-url').value = 'https://generator.example/gen?zone=custom&sessType=sticky';
+  h.get('proxy-generator-blocked-countries').value = 'us, hk, vn';
+  h.get('proxy-generator-ttl-minutes').value = '6';
+  await h.get('config-form').fire('input');
+  await h.get('save-config').click();
+  assert.equal(h.calls.save[0].accounts[0].egress_mode, 'generator');
+  assert.equal(h.calls.save[0].accounts[0].sticky_proxy_url, '');
+  assert.equal(h.calls.save[0].proxy_generator_url, 'https://generator.example/gen?zone=custom&sessType=sticky');
+  assert.deepEqual(h.calls.save[0].proxy_generator_blocked_countries, ['HK', 'US', 'VN']);
+  assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
   h.runtime.stop();
 });
 

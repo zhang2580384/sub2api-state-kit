@@ -29,9 +29,9 @@
 | --- | --- | --- |
 | **增量版** | 已有源码，想查看或合并 STATE 修改 | [`overlay/` + `prepare.py`](#获取完整可构建源码)，基于 0.2.6；在账号编辑页配置 |
 | **完整项目版** | 想部署一个空白的 Sub2API + STATE 实例 | [完整部署版 v0.2.0](https://github.com/wangyunjeff/sub2api-state-kit/releases/tag/v0.2.0)，含程序、网页、Compose 和完整源码 |
-| **插件版（新增）** | 已在使用官方 Sub2API 0.2.7，希望保留原版宿主 | [插件版 v0.3.7](https://github.com/zhang2580384/sub2api-state-kit/releases/tag/v0.3.7)，上传 `.s2plugin`，在插件配置页逐账号设置 |
+| **插件版（新增）** | 已在使用官方 Sub2API 0.2.7，希望保留原版宿主 | `v0.3.8` 已加入内置代理生成器并生成三平台签名候选包；正式安装包以最新 Release 为准，上传 `.s2plugin` 后在插件配置页逐账号设置 |
 
-**插件版不需要覆盖宿主源码。** 首次安装需要向宿主配置追加一次发布者公钥；支持 Linux amd64 / arm64，以及 macOS arm64。全局动态池、账号开关、Pro / Team、固定出口复验、续期与守护都在插件页操作。插件与源码版的入口、调度行为和 WebSocket 路径存在区别，详见 **[插件安装指南](docs/plugin.md)** 和 [插件验证记录](docs/plugin-validation.md)。同一个实例选择一种 STATE 实现即可，不建议叠加。
+**插件版不需要覆盖宿主源码。** 首次安装需要向宿主配置追加一次发布者公钥；支持 Linux amd64 / arm64，以及 macOS arm64。全局动态池、内置代理生成器、账号开关、Pro / Team、地区过滤、固定出口复验、续期与守护都在插件页操作。插件与源码版的入口、调度行为和 WebSocket 路径存在区别，详见 **[插件安装指南](docs/plugin.md)** 和 [插件验证记录](docs/plugin-validation.md)。同一个实例选择一种 STATE 实现即可，不建议叠加。
 
 以下完整部署步骤和截图针对 **v0.2.6 源码版 / 完整项目版**；插件用户请直接按上面的插件指南设置。
 

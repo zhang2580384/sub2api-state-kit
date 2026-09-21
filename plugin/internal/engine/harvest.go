@@ -86,7 +86,7 @@ func (e *Engine) schedule() {
 				continue
 			}
 			t := e.tickets[k]
-			if validTicket(t, e.config, a, model, now) && t.ExpiresAt.Sub(now) > time.Duration(e.config.RefreshBeforeMinutes)*time.Minute {
+			if validTicket(t, e.config, a, model, now) && t.ExpiresAt.Sub(now) > time.Duration(effectiveRefreshBeforeMinutes(e.config, a))*time.Minute {
 				continue
 			}
 			c := e.config
@@ -180,22 +180,50 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			return
 		}
 		targetProxyURL := ""
-		upstreamProxyURL := ""
-		if a.EgressMode == egressModePlugin {
+		upstreamProxyURL := c.UpstreamProxyURL
+		switch a.EgressMode {
+		case egressModePlugin:
 			targetProxyURL = a.StickyProxyURL
-			upstreamProxyURL = c.UpstreamProxyURL
-		} else {
+		case egressModeGenerator:
+			targetProxyURL, err = e.generateProxy(ctx, c)
+			if err != nil {
+				reason = "generator_unavailable"
+				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
+					UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
+				continue
+			}
+		default:
 			targetProxyURL, err = rotateProxy(c.DynamicProxyURL)
 			if err != nil {
 				reason = "invalid_dynamic_proxy"
 				return
 			}
-			upstreamProxyURL = c.UpstreamProxyURL
+		}
+		generatorMode := a.EgressMode == egressModeGenerator
+		captureEgress := ""
+		captureCountry := ""
+		if generatorMode {
+			captureEgress = e.lookupEgressIPRequired(ctx, targetProxyURL, upstreamProxyURL)
+			if captureEgress == "" {
+				reason = "generator_egress_unavailable"
+				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
+					UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, Outcome: "egress_unavailable", Error: reason})
+				continue
+			}
+			captureCountry = e.lookupEgressCountry(ctx, targetProxyURL, upstreamProxyURL, captureEgress)
+			if countryBlocked(captureCountry, c.ProxyGeneratorBlockedCountries) {
+				reason = "generator_region_blocked"
+				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
+					UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, CaptureEgress: captureEgress, Outcome: "region_blocked", Error: reason})
+				continue
+			}
 		}
 		captured := time.Now()
 		captureStarted := time.Now()
 		candidate, status, captureModel, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "")
-		captureEgress := e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
+		if !generatorMode {
+			captureEgress = e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
+		}
 		captureEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
 			UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, CaptureEgress: captureEgress,
 			StateLength: len(candidate), StateClass: stateDiagnosticClass(candidate), ResponseModel: captureModel,
@@ -231,17 +259,31 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			reason = "identity_changed"
 			continue
 		}
-		fixedProxyURL, fixedUpstreamProxyURL, err := accountEgress(c, a, fixed.ProxyUrl)
-		if err != nil {
-			reason = "account_egress_invalid"
-			return
+		fixedProxyURL := targetProxyURL
+		fixedUpstreamProxyURL := upstreamProxyURL
+		if a.EgressMode == egressModeSub2 {
+			fixedProxyURL, fixedUpstreamProxyURL, err = accountEgress(c, a, fixed.ProxyUrl, nil)
+			if err != nil {
+				reason = "account_egress_invalid"
+				return
+			}
 		}
 		validationStarted := time.Now()
 		fixedEgress := e.lookupEgressIP(ctx, fixedProxyURL, fixedUpstreamProxyURL)
+		if generatorMode {
+			fixedEgress = e.lookupEgressIPRequired(ctx, fixedProxyURL, fixedUpstreamProxyURL)
+		}
 		validationEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "fixed_validation", Attempt: attempt,
 			UpstreamProxy: fixedUpstreamProxyURL, TargetProxy: fixedProxyURL, CaptureEgress: captureEgress, FixedEgress: fixedEgress,
 			EgressMatch: egressMatch(captureEgress, fixedEgress)}
-		if a.EgressMode == egressModePlugin && captureEgress != "" && fixedEgress != "" && captureEgress != fixedEgress {
+		if generatorMode && fixedEgress == "" {
+			reason = "generator_egress_unavailable"
+			validationEvent.Outcome = "egress_unavailable"
+			validationEvent.Error = reason
+			e.recordDiagnostic(validationEvent)
+			continue
+		}
+		if (a.EgressMode == egressModePlugin || generatorMode) && captureEgress != "" && fixedEgress != "" && captureEgress != fixedEgress {
 			reason = "sticky_egress_changed"
 			validationEvent.Outcome = "egress_changed"
 			e.recordDiagnostic(validationEvent)
@@ -271,7 +313,14 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		validationEvent.Outcome = "accepted"
 		e.recordDiagnostic(validationEvent)
-		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: candidate, Version: randomID(), ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured, ExpiresAt: captured.Add(time.Duration(c.TTLMinutes) * time.Minute)}
+		generatedProxyURL := ""
+		if generatorMode {
+			generatedProxyURL = fixedProxyURL
+		}
+		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: candidate, Version: randomID(),
+			ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), GeneratedProxyURL: generatedProxyURL,
+			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured,
+			ExpiresAt: captured.Add(time.Duration(effectiveTTLMinutes(c, a)) * time.Minute)}
 		if e.commit(ctx, host, c, a, model, k, gen, t, true) {
 			success = true
 			return
@@ -331,22 +380,42 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	if err != nil || r == nil || !r.Found || len(r.Value) > 16*1024 {
 		return false, 0
 	}
-	targetProxyURL, upstreamProxyURL, err := accountEgress(c, a, identity.ProxyUrl)
+	var t ticket
+	if json.Unmarshal(r.Value, &t) != nil {
+		return false, 0
+	}
+	targetProxyURL, upstreamProxyURL, err := accountEgress(c, a, identity.ProxyUrl, &t)
 	if err != nil {
 		return false, 0
 	}
 	expectedFingerprint := proxyFingerprint(targetProxyURL)
-	var t ticket
-	if json.Unmarshal(r.Value, &t) != nil || !validTicket(&t, c, a, model, time.Now()) || t.Version == revoked || t.FixedFingerprint != expectedFingerprint || t.IdentityFingerprint != stableIdentity(identity) {
+	if !validTicket(&t, c, a, model, time.Now()) || t.Version == revoked || t.FixedFingerprint != expectedFingerprint || t.IdentityFingerprint != stableIdentity(identity) {
 		return false, 0
 	}
 	restoreStarted := time.Now()
 	fixedEgress := e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
-	returned, status, responseModel, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, t.State)
+	if a.EgressMode == egressModeGenerator {
+		fixedEgress = e.lookupEgressIPRequired(ctx, targetProxyURL, upstreamProxyURL)
+	}
 	event := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "restore",
 		UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL,
-		FixedEgress: fixedEgress, StateLength: len(returned), StateClass: stateDiagnosticClass(returned),
-		ResponseModel: responseModel, HTTPStatus: status, DurationMS: time.Since(restoreStarted).Milliseconds()}
+		FixedEgress: fixedEgress}
+	if a.EgressMode == egressModeGenerator && (fixedEgress == "" || (t.GeneratedEgressIP != "" && fixedEgress != t.GeneratedEgressIP)) {
+		event.Outcome = "egress_changed"
+		event.Error = "generator_egress_unavailable"
+		if fixedEgress != "" {
+			event.Error = "sticky_egress_changed"
+		}
+		event.DurationMS = time.Since(restoreStarted).Milliseconds()
+		e.recordDiagnostic(event)
+		return false, 0
+	}
+	returned, status, responseModel, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, t.State)
+	event.StateLength = len(returned)
+	event.StateClass = stateDiagnosticClass(returned)
+	event.ResponseModel = responseModel
+	event.HTTPStatus = status
+	event.DurationMS = time.Since(restoreStarted).Milliseconds()
 	if err != nil || validState(returned, 312) {
 		event.Outcome = "validation_failed"
 		if validState(returned, 312) {

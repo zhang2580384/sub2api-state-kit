@@ -5,10 +5,12 @@
   else api.start(global);
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
-  const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '', ttl_minutes: 60,
-    refresh_before_minutes: 10, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
+  const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
+    proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 5,
+    ttl_minutes: 60, refresh_before_minutes: 10, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
   const NUMBERS = Object.freeze({ ttl_minutes: [1, 60, '票据有效期'], refresh_before_minutes: [0, 59, '提前续期'],
-    max_attempts: [1, 32, '每轮最多尝试'], attempt_interval_seconds: [1, 300, '尝试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
+    proxy_generator_ttl_minutes: [1, 30, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
+    attempt_interval_seconds: [1, 300, '尝试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
     ready: ['可用', 'success'], renewing: ['正在续期', ''], cooldown: ['冷却中', 'warning'],
@@ -19,6 +21,8 @@
     invalid_dynamic_proxy: '动态代理配置无效', harvest_failed: '动态代理获取票据未成功', unexpected_state_length: '票据长度与所选套餐不符',
     identity_changed: '账号授权信息发生变化', account_egress_invalid: '账号出口代理配置无效',
     fixed_proxy_validation_failed: '票据未通过账号业务代理验证', sticky_egress_changed: '账号粘性代理出口发生变化',
+    generator_unavailable: '代理生成器暂时不可用', generator_egress_unavailable: '生成器出口暂时不可用',
+    generator_region_blocked: '生成器出口位于阻止地区，正在重试',
     ticket_persistence_failed: '票据保存失败', upstream_unauthorized: '上游拒绝授权（401）', upstream_forbidden: '上游拒绝访问（403）',
     upstream_rate_limited: '上游限流（429）', upstream_rejected: '上游拒绝请求', model_mismatch: '返回模型不匹配，正在重新获取票据',
     state_312: '收到 312 状态，正在重新获取票据', model_mismatch_persistence_failed: '返回模型不匹配，票据失效记录保存失败',
@@ -88,11 +92,38 @@
       throw new Error(label + '须为完整的 HTTP(S) 或 SOCKS5(H) 地址。');
     }
   }
+  function validateGeneratorURL(value) {
+    if (typeof value !== 'string') throw new Error('代理生成器地址格式不正确。');
+    if (value === '') return;
+    try {
+      if (value.length > 8192 || /[\r\n\t]/.test(value)) throw new Error();
+      const url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.hash || url.username || url.password) throw new Error();
+    } catch (_) {
+      throw new Error('代理生成器须为不含认证信息或锚点的 HTTP(S) 地址。');
+    }
+  }
+  function normalizeBlockedCountries(value) {
+    if (!Array.isArray(value) || value.length > 32) throw new Error('阻止国家或地区最多填写 32 个 ISO 两位代码。');
+    const seen = new Set();
+    const countries = [];
+    value.forEach(function (entry) {
+      if (typeof entry !== 'string') throw new Error('阻止国家或地区须使用 ISO 两位代码。');
+      const code = entry.trim().toUpperCase();
+      if (!code) return;
+      if (!/^[A-Z]{2}$/.test(code)) throw new Error('阻止国家或地区须使用 ISO 两位代码。');
+      if (!seen.has(code)) { seen.add(code); countries.push(code); }
+    });
+    if (!seen.has('HK')) countries.push('HK');
+    return countries.sort();
+  }
   function normalizeConfig(input) {
     const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-    const config = Object.assign({}, DEFAULT_CONFIG);
+    const config = Object.assign({}, DEFAULT_CONFIG, { proxy_generator_blocked_countries: DEFAULT_CONFIG.proxy_generator_blocked_countries.slice() });
     Object.keys(DEFAULT_CONFIG).forEach(function (key) {
-      if (source[key] !== undefined) config[key] = source[key];
+      if (source[key] !== undefined) {
+        config[key] = key === 'proxy_generator_blocked_countries' && Array.isArray(source[key]) ? source[key].slice() : source[key];
+      }
     });
     config.accounts = Array.isArray(source.accounts) ? source.accounts.map(function (account) {
       return { account_id: account.account_id, name: accountText(account.name, 'name'),
@@ -108,6 +139,9 @@
     if (proxyID(config.upstream_proxy_id) === null) throw new Error('第一层代理编号格式不正确。');
     validateProxyAddress(config.upstream_proxy_url, '第一层代理');
     validateProxyAddress(config.dynamic_proxy_url, '动态代理');
+    config.proxy_generator_url = typeof config.proxy_generator_url === 'string' ? config.proxy_generator_url.trim() : '';
+    validateGeneratorURL(config.proxy_generator_url);
+    config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
     Object.keys(NUMBERS).forEach(function (key) {
       const bounds = NUMBERS[key];
       if (!Number.isInteger(config[key]) || config[key] < bounds[0] || config[key] > bounds[1]) {
@@ -127,7 +161,7 @@
       account.expires_at = validateAccountText(account.expires_at, '账号到期时间', 'expires_at');
       account.quota = validateAccountText(account.quota, '账号额度', 'quota');
       if (typeof account.enabled !== 'boolean') throw new Error('账号开关格式不正确。');
-      if (!['sub2', 'plugin'].includes(account.egress_mode)) throw new Error('请选择 Sub2 原有代理或插件固定出口。');
+      if (!['sub2', 'plugin', 'generator'].includes(account.egress_mode)) throw new Error('请选择 Sub2 原有代理、账号粘性代理或代理生成器出口。');
       validateProxyAddress(account.sticky_proxy_url, '账号粘性代理');
       if (account.egress_mode === 'plugin') {
         if (!account.sticky_proxy_url) throw new Error('插件固定出口模式必须填写账号粘性代理。');
@@ -147,6 +181,9 @@
     if (config.enabled && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'sub2'; }) && !config.dynamic_proxy_url) {
       throw new Error('启用 Sub2 原有代理模式的账号前，请填写动态代理地址。');
     }
+    if (config.enabled && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'generator'; }) && !config.proxy_generator_url) {
+      throw new Error('启用代理生成器出口模式的账号前，请填写代理生成器地址。');
+    }
     if (config.upstream_proxy_id > 0 && !config.upstream_proxy_url) {
       throw new Error('所选第一层代理缺少可用的代理地址。');
     }
@@ -165,6 +202,7 @@
       model_mismatch: '模型不一致', incomplete: '响应未完成', upstream_read_error: '响应中断',
       upstream_transport: '传输失败', upstream_transport_dns: 'DNS 失败', upstream_transport_connect: '连接失败',
       upstream_transport_tls: 'TLS 失败', upstream_transport_timeout: '传输超时', upstream_transport_reset: '连接重置',
+      generator_failed: '生成器调用失败', egress_unavailable: '出口不可用', region_blocked: '地区被阻止',
       egress_changed: '出口 IP 不一致' })[outcome] || '未知结果';
   }
   function safeDiagnosticText(value, max) {
@@ -254,6 +292,7 @@
     let savedUpstreamProxyID = 0;
     let savedUpstreamProxyURL = '';
     const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_minutes: 'refresh-before-minutes',
+      proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
       max_attempts: 'max-attempts', attempt_interval_seconds: 'attempt-interval-seconds', cooldown_seconds: 'cooldown-seconds' };
     function element(tag, text, className) {
       const node = document.createElement(tag);
@@ -323,7 +362,7 @@
         const egressCell = element('td');
         const egressMode = element('select');
         egressMode.setAttribute('aria-label', '账号 ' + account.account_id + ' 的出口模式');
-        [['sub2', 'Sub2 原有代理'], ['plugin', '插件固定出口']].forEach(function (entry) {
+        [['sub2', 'Sub2 原有代理'], ['plugin', '账号粘性代理'], ['generator', '代理生成器']].forEach(function (entry) {
           const option = element('option', entry[1]); option.value = entry[0]; egressMode.appendChild(option);
         });
         egressMode.value = account.egress_mode;
@@ -448,6 +487,8 @@
       savedUpstreamProxyURL = config.upstream_proxy_url;
       renderProxyOptions(savedUpstreamProxyID);
       byID('dynamic-proxy-url').value = config.dynamic_proxy_url;
+      byID('proxy-generator-url').value = config.proxy_generator_url;
+      byID('proxy-generator-blocked-countries').value = config.proxy_generator_blocked_countries.join(', ');
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
       accounts = config.accounts.map(mergeHostAccountMetadata);
       renderAccounts();
@@ -467,7 +508,9 @@
         enabled: byID('enabled').checked,
         upstream_proxy_id: selectedProxyID === null ? NaN : selectedProxyID,
         upstream_proxy_url: upstreamProxyURL,
-        dynamic_proxy_url: byID('dynamic-proxy-url').value.trim()
+        dynamic_proxy_url: byID('dynamic-proxy-url').value.trim(),
+        proxy_generator_url: byID('proxy-generator-url').value.trim(),
+        proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean)
       };
       Object.keys(numberIDs).forEach(function (key) {
         const raw = byID(numberIDs[key]).value.trim();

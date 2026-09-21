@@ -9,26 +9,31 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "0.3.7"
+const Version = "0.3.8"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
 const (
-	egressModeSub2   = "sub2"
-	egressModePlugin = "plugin"
+	egressModeSub2      = "sub2"
+	egressModePlugin    = "plugin"
+	egressModeGenerator = "generator"
 )
 
 // Config contains no OAuth credentials. The host owns credential refresh.
 type Config struct {
-	Enabled          bool   `json:"enabled"`
-	UpstreamProxyID  int64  `json:"upstream_proxy_id"`
-	UpstreamProxyURL string `json:"upstream_proxy_url"`
-	DynamicProxyURL  string `json:"dynamic_proxy_url"`
+	Enabled                        bool     `json:"enabled"`
+	UpstreamProxyID                int64    `json:"upstream_proxy_id"`
+	UpstreamProxyURL               string   `json:"upstream_proxy_url"`
+	DynamicProxyURL                string   `json:"dynamic_proxy_url"`
+	ProxyGeneratorURL              string   `json:"proxy_generator_url"`
+	ProxyGeneratorBlockedCountries []string `json:"proxy_generator_blocked_countries"`
+	ProxyGeneratorTTLMinutes       int      `json:"proxy_generator_ttl_minutes"`
 	// DiagnosticLogEnabled is retained only so configurations saved by v0.3.6
 	// remain loadable. Diagnostics are now a UI-scoped live listener and the
 	// value is intentionally ignored.
@@ -54,7 +59,16 @@ type AccountConfig struct {
 }
 
 func DefaultConfig() Config {
-	return Config{TTLMinutes: 60, RefreshBeforeMinutes: 10, MaxAttempts: 8, AttemptIntervalSeconds: 10, CooldownSeconds: 300, Accounts: []AccountConfig{}}
+	return Config{
+		TTLMinutes:                     60,
+		RefreshBeforeMinutes:           10,
+		MaxAttempts:                    8,
+		AttemptIntervalSeconds:         10,
+		CooldownSeconds:                300,
+		ProxyGeneratorBlockedCountries: []string{"HK"},
+		ProxyGeneratorTTLMinutes:       5,
+		Accounts:                       []AccountConfig{},
+	}
 }
 
 var modelPattern = regexp.MustCompile(`^gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,94}$`)
@@ -79,6 +93,7 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	c.UpstreamProxyURL = strings.TrimSpace(c.UpstreamProxyURL)
 	c.DynamicProxyURL = strings.TrimSpace(c.DynamicProxyURL)
+	c.ProxyGeneratorURL = strings.TrimSpace(c.ProxyGeneratorURL)
 	if c.UpstreamProxyID < 0 {
 		return c, errors.New("upstream_proxy_id must be nonnegative")
 	}
@@ -97,12 +112,23 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.CooldownSeconds < 30 || c.CooldownSeconds > 3600 {
 		return c, errors.New("cooldown_seconds must be 30..3600")
 	}
+	if c.ProxyGeneratorTTLMinutes < 1 || c.ProxyGeneratorTTLMinutes > 30 {
+		return c, errors.New("proxy_generator_ttl_minutes must be 1..30")
+	}
 	if err := validateProxy(c.UpstreamProxyURL); err != nil {
 		return c, err
 	}
 	if err := validateProxy(c.DynamicProxyURL); err != nil {
 		return c, err
 	}
+	if err := validateProxyGeneratorURL(c.ProxyGeneratorURL); err != nil {
+		return c, err
+	}
+	blockedCountries, err := normalizeBlockedCountries(c.ProxyGeneratorBlockedCountries)
+	if err != nil {
+		return c, err
+	}
+	c.ProxyGeneratorBlockedCountries = blockedCountries
 	if c.UpstreamProxyID > 0 && c.UpstreamProxyURL == "" {
 		return c, errors.New("upstream_proxy_url is required when upstream_proxy_id is set")
 	}
@@ -115,6 +141,7 @@ func ParseConfig(raw []byte) (Config, error) {
 	seen := map[int64]bool{}
 	anyEnabled := false
 	needsDynamicProxy := false
+	needsGenerator := false
 	total := 0
 	for i := range c.Accounts {
 		a := &c.Accounts[i]
@@ -129,8 +156,8 @@ func ParseConfig(raw []byte) (Config, error) {
 		if a.EgressMode == "" {
 			a.EgressMode = egressModeSub2
 		}
-		if a.EgressMode != egressModeSub2 && a.EgressMode != egressModePlugin {
-			return c, errors.New("egress_mode must be sub2 or plugin")
+		if a.EgressMode != egressModeSub2 && a.EgressMode != egressModePlugin && a.EgressMode != egressModeGenerator {
+			return c, errors.New("egress_mode must be sub2, plugin, or generator")
 		}
 		a.StickyProxyURL = strings.TrimSpace(a.StickyProxyURL)
 		if err := validateProxy(a.StickyProxyURL); err != nil {
@@ -166,6 +193,7 @@ func ParseConfig(raw []byte) (Config, error) {
 		total += len(a.Models)
 		anyEnabled = anyEnabled || a.Enabled
 		needsDynamicProxy = needsDynamicProxy || a.Enabled && a.EgressMode == egressModeSub2
+		needsGenerator = needsGenerator || a.Enabled && a.EgressMode == egressModeGenerator
 	}
 	if total > 1024 {
 		return c, errors.New("at most 1024 account/model pairs are supported")
@@ -173,7 +201,36 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.Enabled && anyEnabled && needsDynamicProxy && c.DynamicProxyURL == "" {
 		return c, errors.New("dynamic_proxy_url is required for enabled accounts using sub2 egress")
 	}
+	if c.Enabled && anyEnabled && needsGenerator && c.ProxyGeneratorURL == "" {
+		return c, errors.New("proxy_generator_url is required for enabled accounts using generator egress")
+	}
 	return c, nil
+}
+
+func normalizeBlockedCountries(raw []string) ([]string, error) {
+	if len(raw) > 32 {
+		return nil, errors.New("proxy_generator_blocked_countries supports at most 32 country codes")
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(raw)+1)
+	for _, value := range raw {
+		code := strings.ToUpper(strings.TrimSpace(value))
+		if code == "" {
+			continue
+		}
+		if len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
+			return nil, errors.New("proxy_generator_blocked_countries must contain ISO alpha-2 codes")
+		}
+		if !seen[code] {
+			seen[code] = true
+			result = append(result, code)
+		}
+	}
+	if !seen["HK"] {
+		result = append(result, "HK")
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func normalizeAccountDisplayFields(a *AccountConfig) error {
@@ -238,6 +295,23 @@ func validateProxy(raw string) error {
 	}
 	return nil
 }
+
+func validateProxyGeneratorURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 8192 || strings.ContainsAny(raw, "\r\n\t") {
+		return errors.New("invalid proxy generator URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.Fragment != "" || u.User != nil {
+		return errors.New("invalid proxy generator URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("proxy generator URL scheme must be http or https")
+	}
+	return nil
+}
 func digest(parts ...string) string {
 	h := sha256.New()
 	for _, s := range parts {
@@ -247,12 +321,30 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v3", c.UpstreamProxyURL, c.DynamicProxyURL, a.Plan, model, jsonText(struct {
-		ID             int64
-		TTL            int
-		EgressMode     string
-		StickyProxyURL string
-	}{a.AccountID, c.TTLMinutes, a.EgressMode, a.StickyProxyURL}))
+	return digest("v4", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
+		a.Plan, model, jsonText(struct {
+			ID             int64
+			TTL            int
+			EgressMode     string
+			StickyProxyURL string
+		}{a.AccountID, c.TTLMinutes, a.EgressMode, a.StickyProxyURL}))
+}
+func effectiveTTLMinutes(c Config, a AccountConfig) int {
+	if a.EgressMode == egressModeGenerator && c.ProxyGeneratorTTLMinutes < c.TTLMinutes {
+		return c.ProxyGeneratorTTLMinutes
+	}
+	return c.TTLMinutes
+}
+func effectiveRefreshBeforeMinutes(c Config, a AccountConfig) int {
+	ttl := effectiveTTLMinutes(c, a)
+	if c.RefreshBeforeMinutes < ttl {
+		return c.RefreshBeforeMinutes
+	}
+	if ttl <= 1 {
+		return 0
+	}
+	return ttl - 1
 }
 func jsonText(v any) string { b, _ := json.Marshal(v); return string(b) }
 func targetLength(plan string) int {

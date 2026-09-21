@@ -88,21 +88,16 @@ func freshProbeClient(proxyURL, upstreamProxyURL string) (*http.Client, error) {
 
 func makeHTTPClient(proxyURL, upstreamProxyURL string, fresh bool) (*http.Client, error) {
 	var proxy func(*http.Request) (*url.URL, error)
-	var targetProxy *url.URL
 	if proxyURL != "" {
 		parsed, err := parseProxyURL(proxyURL)
 		if err != nil {
 			return nil, err
 		}
-		targetProxy = parsed
 		proxy = http.ProxyURL(parsed)
 	}
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	dialContext := dialer.DialContext
 	if upstreamProxyURL != "" {
-		if targetProxy == nil {
-			return nil, errors.New("upstream proxy requires a target proxy")
-		}
 		upstream, err := parseProxyURL(upstreamProxyURL)
 		if err != nil {
 			return nil, err
