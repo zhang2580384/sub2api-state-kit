@@ -16,7 +16,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "0.3.9"
+const Version = "4.0.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -35,6 +35,7 @@ type Config struct {
 	ProxyGeneratorURL              string   `json:"proxy_generator_url"`
 	ProxyGeneratorBlockedCountries []string `json:"proxy_generator_blocked_countries"`
 	ProxyGeneratorTTLMinutes       int      `json:"proxy_generator_ttl_minutes"`
+	PreferPreviousIP               bool     `json:"prefer_previous_ip"`
 	// DiagnosticLogEnabled is retained only so configurations saved by v0.3.6
 	// remain loadable. Diagnostics are now a UI-scoped live listener and the
 	// value is intentionally ignored.

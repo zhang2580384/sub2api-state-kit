@@ -15,6 +15,7 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7 }] }).accounts[0].plan, 'pro');
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7 }] }).accounts[0].egress_mode, 'sub2');
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7, name: ' Example ' }] }).accounts[0].name, 'Example');
+  assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
   assert.equal(ui.validateConfig(configured()).enabled, false);
 });
 
@@ -63,6 +64,9 @@ test('generator egress uses the plugin API and always blocks unknown or Hong Kon
   config.proxy_generator_url = 'https://generator.example/gen';
   config.proxy_generator_blocked_countries = ['HKG'];
   assert.throws(() => ui.validateConfig(config), /ISO 两位代码/);
+  config.proxy_generator_blocked_countries = ['HK'];
+  config.prefer_previous_ip = 'yes';
+  assert.throws(() => ui.validateConfig(config), /复用开关/);
 });
 
 test('account labels omit empty fields instead of showing placeholder text', () => {
@@ -287,6 +291,7 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   assert.equal(sticky.disabled, true);
   h.get('proxy-generator-url').value = 'https://generator.example/gen?zone=custom&sessType=sticky';
   h.get('proxy-generator-blocked-countries').value = 'us, hk, vn';
+  h.get('prefer-previous-ip').checked = true;
   h.get('proxy-generator-ttl-minutes').value = '6';
   h.get('refresh-before-seconds').value = '30';
   await h.get('config-form').fire('input');
@@ -295,6 +300,7 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   assert.equal(h.calls.save[0].accounts[0].sticky_proxy_url, '');
   assert.equal(h.calls.save[0].proxy_generator_url, 'https://generator.example/gen?zone=custom&sessType=sticky');
   assert.deepEqual(h.calls.save[0].proxy_generator_blocked_countries, ['HK', 'US', 'VN']);
+  assert.equal(h.calls.save[0].prefer_previous_ip, true);
   assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
   assert.equal(h.calls.save[0].refresh_before_seconds, 30);
   h.runtime.stop();

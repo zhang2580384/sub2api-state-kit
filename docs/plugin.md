@@ -2,9 +2,9 @@
 
 插件版使用官方 **Sub2API v0.2.7** 的 `.s2plugin` 接口，不需要覆盖或编译宿主源码。它与本仓库基于 v0.2.6 的增量版、完整部署版是三个可选入口，**选择一种即可**。
 
-- 当前状态：`0.3.9` 已加入秒级续期窗口，并保持续期期间旧票据可用；正式安装包仍以最新 Release 为准。
-- 候选安装文件：`sub2api-state-kit_plugin_v0.3.9.s2plugin`（验证后发布）
-- 完整插件源码：`sub2api-state-kit_plugin_v0.3.9_source.zip`，或本仓库的 [`plugin/`](../plugin/)
+- 当前状态：`4.0.0` 已加入秒级续期和账号级上一轮可用出口复用；正式安装包仍以最新 Release 为准。
+- 候选安装文件：`sub2api-state-kit_plugin_v4.0.0.s2plugin`（验证后发布）
+- 完整插件源码：`sub2api-state-kit_plugin_v4.0.0_source.zip`，或本仓库的 [`plugin/`](../plugin/)
 - 当前发布包包含 Linux amd64、Linux arm64 和 macOS arm64 运行时；宿主自动选择对应架构。
 - 官方接口基线：[v0.2.7 / aea725f](https://github.com/Wei-Shaw/sub2api/tree/aea725f2ea644d5592d0bbb1d63b607efa7e200a)。清单兼容范围为 `>=0.2.7 <0.3.0`，实际验证基线为 0.2.7，其他版本仍需测试。
 
@@ -17,6 +17,7 @@
 | 全局动态池 | 填一次，用于启用账号的后台采集；支持 HTTP(S)、SOCKS5(h) 和会话占位符 |
 | 代理生成器 API | 插件通过第一层代理调用生成器，取得返回的固定 `host:port`；支持查询参数，不接受认证信息或 URL 锚点 |
 | 生成器地区过滤 | 默认阻止香港 `HK`，可追加其他 ISO 两位代码；未知出口地区也会被拒绝并重试 |
+| 上一轮出口复用 | 可开启按账号优先复用上一次通过复验的生成器出口；出口失效、地区受限或复验失败时自动回退到生成器获取新出口 |
 | 账号开关 | 默认全部关闭；只为明确开启的账号和模型采集、注入和守护 |
 | 账号出口模式 | `Sub2 原有代理` 保持宿主行为；`账号粘性代理` 使用固定 session；`代理生成器` 由插件取得并固定本次生成端口 |
 | 账号粘性代理 | 粘性代理模式下必须填写包含服务商固定 session 的 HTTP(S) / SOCKS5(h) 地址；不接受 `{random}` 或 `{sid}` 占位符 |
@@ -59,7 +60,7 @@
 
    用户名和密码中的特殊字符须分别进行 URL 百分号编码。`{sid}` / `{random}` 用于轮换会话；服务商是否更换实际出口，以其行为为准。这个字段只填代理地址，不要在这里填“获取代理列表”的 HTTP API；生成器 API 使用下方的独立字段。
 
-3. 如需使用内置生成器，在“代理生成器 API”填写 `.../gen` 地址，并在“生成器阻止国家或地区”保留 `HK` 或追加其他 ISO 两位代码。插件会先调用 API，再通过第一层代理检查生成出口；香港和无法确认地区的出口不会用于打票。
+3. 如需使用内置生成器，在“代理生成器 API”填写 `.../gen` 地址，并在“生成器阻止国家或地区”保留 `HK` 或追加其他 ISO 两位代码。插件会先调用 API，再通过第一层代理检查生成出口；香港和无法确认地区的出口不会用于打票。需要让同一账号后续打票优先复用此前已验证出口时，打开“优先复用账号上一轮可用出口 IP”。
 4. 添加对应账号，补全名称、邮箱、到期时间和额度。需要由插件接管出口的账号可选择 `账号粘性代理` 或 `代理生成器`；其他账号保留 `Sub2 原有代理`。
 5. 选择 Pro / Team，从常用模型中选择或填写自定义模型，再打开账号开关。
 6. 打开插件内的 STATE 总开关并保存，等待票据状态变为可用，再发送业务请求。
@@ -106,7 +107,7 @@ node --test ui-tests/*.test.cjs
 python3 scripts/package_plugin.py build \
   --private-key /PRIVATE/PATH/publisher.pem --output ./artifacts
 python3 scripts/package_plugin.py verify \
-  --package ./artifacts/sub2api-state-kit_plugin_v0.3.9.s2plugin
+  --package ./artifacts/sub2api-state-kit_plugin_v4.0.0.s2plugin
 ```
 
 测试覆盖范围与实际结果见 [插件验证记录](plugin-validation.md)。安装包不含作者的账号、代理凭据、API Key、数据库、STATE 或签名私钥。

@@ -6,7 +6,7 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
-    proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 5,
+    proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 5, prefer_previous_ip: false,
     ttl_minutes: 60, refresh_before_seconds: 60, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
   const NUMBERS = Object.freeze({ ttl_minutes: [1, 60, '票据有效期'], refresh_before_seconds: [0, 3599, '提前续期'],
     proxy_generator_ttl_minutes: [1, 30, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
@@ -145,6 +145,7 @@
     config.proxy_generator_url = typeof config.proxy_generator_url === 'string' ? config.proxy_generator_url.trim() : '';
     validateGeneratorURL(config.proxy_generator_url);
     config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
+    if (typeof config.prefer_previous_ip !== 'boolean') throw new Error('上一轮可用出口复用开关格式不正确。');
     Object.keys(NUMBERS).forEach(function (key) {
       const bounds = NUMBERS[key];
       if (!Number.isInteger(config[key]) || config[key] < bounds[0] || config[key] > bounds[1]) {
@@ -492,6 +493,7 @@
       byID('dynamic-proxy-url').value = config.dynamic_proxy_url;
       byID('proxy-generator-url').value = config.proxy_generator_url;
       byID('proxy-generator-blocked-countries').value = config.proxy_generator_blocked_countries.join(', ');
+      byID('prefer-previous-ip').checked = config.prefer_previous_ip === true;
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
       accounts = config.accounts.map(mergeHostAccountMetadata);
       renderAccounts();
@@ -513,7 +515,8 @@
         upstream_proxy_url: upstreamProxyURL,
         dynamic_proxy_url: byID('dynamic-proxy-url').value.trim(),
         proxy_generator_url: byID('proxy-generator-url').value.trim(),
-        proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean)
+        proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean),
+        prefer_previous_ip: byID('prefer-previous-ip').checked
       };
       Object.keys(numberIDs).forEach(function (key) {
         const raw = byID(numberIDs[key]).value.trim();

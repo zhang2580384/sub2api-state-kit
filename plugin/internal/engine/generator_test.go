@@ -164,6 +164,179 @@ func TestGeneratorEgressCollectionPersistenceAndRestore(t *testing.T) {
 	}
 }
 
+func TestGeneratorPreferPreviousIPReusesAccountEgress(t *testing.T) {
+	h := testHost(42)
+	state := testState(292)
+	var generatorCalls, probeHits atomic.Int32
+	generatedProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ip":"203.0.113.9"}`)
+		case "geo.test":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"203.0.113.9"}`)
+		default:
+			probeHits.Add(1)
+			w.Header().Set(StateHeader, state)
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer generatedProxy.Close()
+	generator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		generatorCalls.Add(1)
+		_, _ = fmt.Fprintln(w, strings.TrimPrefix(generatedProxy.URL, "http://"))
+	}))
+	defer generator.Close()
+
+	e := testEngine(t, h, "http://chatgpt.example/backend-api/codex/responses")
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(generatedProxy.URL, 42)
+	c.Accounts[0].EgressMode = egressModeGenerator
+	c.ProxyGeneratorURL = generator.URL
+	c.ProxyGeneratorTTLMinutes = 5
+	c.PreferPreviousIP = true
+	c.MaxAttempts = 1
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+
+	first, err := e.ticketForRequest(context.Background(), testStart(42), "gpt-6-astra")
+	if err != nil || first == nil {
+		t.Fatalf("initial generator ticket unavailable: %v", err)
+	}
+	key := keyFor(42, "gpt-6-astra")
+	e.mu.Lock()
+	oldVersion := e.tickets[key].Version
+	e.tickets[key].ExpiresAt = time.Now().Add(2 * time.Second)
+	e.mu.Unlock()
+	e.notify()
+
+	var renewed *receipt
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		e.mu.Lock()
+		current := e.tickets[key]
+		if current != nil && current.Version != oldVersion {
+			renewed = &receipt{TargetProxyURL: current.GeneratedProxyURL}
+		}
+		e.mu.Unlock()
+		if renewed != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if renewed == nil || renewed.TargetProxyURL != first.TargetProxyURL {
+		t.Fatalf("previous egress was not reused: first=%q renewed=%+v", first.TargetProxyURL, renewed)
+	}
+	if generatorCalls.Load() != 1 {
+		t.Fatalf("previous egress reuse called generator %d times", generatorCalls.Load())
+	}
+	if probeHits.Load() != 4 {
+		t.Fatalf("previous egress reuse probe calls = %d; want 4", probeHits.Load())
+	}
+	h.mu.Lock()
+	cached := append([]byte(nil), h.values[namespace+"/"+previousEgressKey(42)]...)
+	h.mu.Unlock()
+	if len(cached) == 0 || strings.Contains(string(cached), "test-token") {
+		t.Fatalf("previous egress cache missing or contains credentials: %s", cached)
+	}
+}
+
+func TestGeneratorPreferPreviousIPFallsBackWhenEgressFails(t *testing.T) {
+	h := testHost(42)
+	state := testState(292)
+	var rejectFirst atomic.Bool
+	var generatorCalls, firstProbeHits atomic.Int32
+	firstProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = io.WriteString(w, `{"ip":"203.0.113.9"}`)
+		case "geo.test":
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"203.0.113.9"}`)
+		default:
+			firstProbeHits.Add(1)
+			if rejectFirst.Load() {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.Header().Set(StateHeader, state)
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer firstProxy.Close()
+	secondProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = io.WriteString(w, `{"ip":"198.51.100.24"}`)
+		case "geo.test":
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"198.51.100.24"}`)
+		default:
+			w.Header().Set(StateHeader, state)
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer secondProxy.Close()
+	generator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := generatorCalls.Add(1)
+		target := firstProxy.URL
+		if call > 1 {
+			target = secondProxy.URL
+		}
+		_, _ = fmt.Fprintln(w, strings.TrimPrefix(target, "http://"))
+	}))
+	defer generator.Close()
+
+	e := testEngine(t, h, "http://chatgpt.example/backend-api/codex/responses")
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(firstProxy.URL, 42)
+	c.Accounts[0].EgressMode = egressModeGenerator
+	c.ProxyGeneratorURL = generator.URL
+	c.ProxyGeneratorTTLMinutes = 5
+	c.PreferPreviousIP = true
+	c.MaxAttempts = 1
+	c.AttemptIntervalSeconds = 1
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+
+	first, err := e.ticketForRequest(context.Background(), testStart(42), "gpt-6-astra")
+	if err != nil || first == nil || first.TargetProxyURL != firstProxy.URL {
+		t.Fatalf("initial generator ticket unavailable: %+v %v", first, err)
+	}
+	rejectFirst.Store(true)
+	key := keyFor(42, "gpt-6-astra")
+	e.mu.Lock()
+	oldVersion := e.tickets[key].Version
+	e.tickets[key].ExpiresAt = time.Now().Add(2 * time.Second)
+	e.mu.Unlock()
+	e.notify()
+
+	var renewed *receipt
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		e.mu.Lock()
+		current := e.tickets[key]
+		if current != nil && current.Version != oldVersion {
+			renewed = &receipt{TargetProxyURL: current.GeneratedProxyURL}
+		}
+		e.mu.Unlock()
+		if renewed != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if renewed == nil || renewed.TargetProxyURL != secondProxy.URL {
+		t.Fatalf("failed previous egress did not fall back to generator: %+v", renewed)
+	}
+	if generatorCalls.Load() != 2 {
+		t.Fatalf("generator calls after fallback = %d; want 2", generatorCalls.Load())
+	}
+	if firstProbeHits.Load() != 3 {
+		t.Fatalf("previous egress probes = %d; want initial capture, validation, and renewal failure", firstProbeHits.Load())
+	}
+}
+
 func TestGeneratorRejectsBlockedCountry(t *testing.T) {
 	h := testHost(42)
 	var generatorCalls, probeHits atomic.Int32

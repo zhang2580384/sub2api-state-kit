@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Draft or published release containing the signed plugin
         required: true
-        default: v0.3.9
+        default: v4.0.0
 
 permissions:
   # GitHub requires write access to retrieve unpublished draft release assets.
@@ -44,11 +44,11 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.s2plugin' --pattern SHA256SUMS --dir artifacts
-          python3 scripts/package_plugin.py verify --package artifacts/sub2api-state-kit_plugin_v0.3.9.s2plugin
+          python3 scripts/package_plugin.py verify --package artifacts/sub2api-state-kit_plugin_v4.0.0.s2plugin
           python3 - <<'PY'
           from pathlib import Path
           import hashlib
-          p = Path('artifacts/sub2api-state-kit_plugin_v0.3.9.s2plugin')
+          p = Path('artifacts/sub2api-state-kit_plugin_v4.0.0.s2plugin')
           expected = next(line.split()[0] for line in Path('artifacts/SHA256SUMS').read_text().splitlines() if line.endswith(p.name))
           assert hashlib.sha256(p.read_bytes()).hexdigest() == expected
           PY
@@ -61,7 +61,7 @@ jobs:
           python3 - <<'PY'
           import hashlib, os, zipfile
           from pathlib import Path
-          with zipfile.ZipFile('artifacts/sub2api-state-kit_plugin_v0.3.9.s2plugin') as z:
+          with zipfile.ZipFile('artifacts/sub2api-state-kit_plugin_v4.0.0.s2plugin') as z:
               delivered = z.read('runtimes/linux-' + os.environ['ARCH'] + '/state-kit')
           assert hashlib.sha256(delivered).digest() == hashlib.sha256(Path('rebuilt-state-kit').read_bytes()).digest(), 'Release binary differs from source build'
           PY
@@ -69,7 +69,7 @@ jobs:
         run: |
           git clone --depth 1 --branch v0.2.7 https://github.com/Wei-Shaw/sub2api.git stock-host
           test "$(git -C stock-host rev-parse HEAD)" = aea725f2ea644d5592d0bbb1d63b607efa7e200a
-          python3 plugin/integration/run_host_contract.py --host-src stock-host --package artifacts/sub2api-state-kit_plugin_v0.3.9.s2plugin --public-key plugin/release/publisher-public-key.txt --log host-contract.log
+          python3 plugin/integration/run_host_contract.py --host-src stock-host --package artifacts/sub2api-state-kit_plugin_v4.0.0.s2plugin --public-key plugin/release/publisher-public-key.txt --log host-contract.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

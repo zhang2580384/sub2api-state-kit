@@ -37,6 +37,7 @@ type Engine struct {
 	directoryAt      time.Time
 	directoryError   string
 	tickets          map[string]*ticket
+	previous         map[int64]previousEgress
 	records          map[string]*jobRecord
 	jobs             map[string]uint64
 	revoked          map[string]string
@@ -72,6 +73,12 @@ type ticket struct {
 	IdentityFingerprint string    `json:"identity_fingerprint"`
 	CapturedAt          time.Time `json:"captured_at"`
 	ExpiresAt           time.Time `json:"expires_at"`
+}
+type previousEgress struct {
+	AccountID int64     `json:"account_id"`
+	ProxyURL  string    `json:"proxy_url"`
+	EgressIP  string    `json:"egress_ip,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 type receipt struct {
 	State, Version, Key, ConfigFingerprint string
@@ -120,7 +127,7 @@ func newEngine(host pluginv1.HostServiceClient, probeURL string, tick time.Durat
 		config: DefaultConfig(), ctx: ctx, cancel: cancel, generationCtx: gc, generationCancel: gcancel,
 		wake: make(chan struct{}, 1), done: make(chan struct{}), host: host, hostReady: host != nil,
 		directory: map[int64]bool{}, tickets: map[string]*ticket{}, records: map[string]*jobRecord{},
-		jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4),
+		previous: map[int64]previousEgress{}, jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4),
 		clients: newClientPool(), probeURL: probeURL, egressURL: "https://api.ipify.org?format=json",
 		geoURLs: []string{
 			"http://ip-api.com/json/{ip}?fields=status,countryCode,query",
@@ -238,6 +245,11 @@ func (e *Engine) ApplyConfig(_ context.Context, r *pluginv1.ApplyConfigRequest) 
 			delete(e.tickets, k)
 		}
 	}
+	for id := range e.previous {
+		if _, ok := findAccount(c, id); !ok {
+			delete(e.previous, id)
+		}
+	}
 	e.mu.Unlock()
 	e.clients.Close()
 	e.notify()
@@ -295,6 +307,7 @@ func keyFor(id int64, model string) string { return fmt.Sprintf("%d.%s", id, mod
 func kvKey(id int64, model, fp string) string {
 	return fmt.Sprintf("ticket.%d.%s", id, digest(model, fp))
 }
+func previousEgressKey(id int64) string  { return fmt.Sprintf("egress.%d", id) }
 func proxyFingerprint(raw string) string { return digest("business-proxy-v1", strings.TrimSpace(raw)) }
 func accountEgress(c Config, a AccountConfig, hostProxyURL string, t *ticket) (string, string, error) {
 	if a.EgressMode == egressModePlugin {

@@ -1,6 +1,6 @@
 # 插件版验证记录
 
-对象：STATE Kit 插件源码 `0.3.9`，官方 Sub2API `v0.2.7`（`aea725f2ea644d5592d0bbb1d63b607efa7e200a`）。本轮加入秒级续期窗口并保持续期期间旧票据可用，尚未部署 `0.3.9` 到宿主。
+对象：STATE Kit 插件源码 `4.0.0`，官方 Sub2API `v0.2.7`（`aea725f2ea644d5592d0bbb1d63b607efa7e200a`）。本轮加入账号级上一轮可用生成器出口复用，并保留秒级续期和续期期间旧票据可用，尚未部署 `4.0.0` 到宿主。
 
 ## 自动化验证
 
@@ -15,7 +15,7 @@
 - `.s2plugin` 打包、清单逐文件 SHA-256 和 Ed25519 签名验证：通过。
 - 宿主契约测试尚未在本轮执行，需在测试宿主上单独运行。
 
-测试覆盖默认关闭、账号隔离、Pro / Team 筛选、Sub2 原有代理、账号粘性代理与代理生成器三种账号模式、生成器 URL/国家过滤/TTL 校验、秒级续期边界、旧分钟配置迁移、续期期间旧票据继续服务、生成器固定出口采集与恢复、代理链、采集与固定出口复验、持久化恢复、失败续期保留旧票据、异常守护、流式转发、取消与并发。
+测试覆盖默认关闭、账号隔离、Pro / Team 筛选、Sub2 原有代理、账号粘性代理与代理生成器三种账号模式、生成器 URL/国家过滤/TTL 校验、秒级续期边界、旧分钟配置迁移、续期期间旧票据继续服务、账号级上一轮可用出口复用与失败回退、生成器固定出口采集与恢复、代理链、采集与固定出口复验、持久化恢复、失败续期保留旧票据、异常守护、流式转发、取消与并发。
 
 实时诊断测试覆盖未打开面板时不采集、连续状态轮询建立监听、关闭后过期清空、240 条环形上限、HTTP 状态与结果分类、出口 IP 一致性判断，以及票据、Token、代理凭据和请求头脱敏。
 
@@ -23,15 +23,15 @@
 
 ## 宿主和生产验收
 
-`0.3.9` 尚未部署到宿主，因此没有新版本的签名安装、升级回退、Bridge、代理生成器链路或 292 持续时长生产验收记录。签名包验证只证明包内容和发布者签名一致，不替代宿主运行与真实上游链路验收。
+`4.0.0` 尚未部署到宿主，因此没有新版本的签名安装、升级回退、Bridge、代理生成器链路、上一轮出口复用或 292 持续时长生产验收记录。签名包验证只证明包内容和发布者签名一致，不替代宿主运行与真实上游链路验收。
 
 ## 当前构建状态
 
-`0.3.9` 签名包已生成并通过脚本验签，包含 Linux amd64、Linux arm64 和 macOS arm64。AMD 宿主应优先下载 `sub2api-state-kit_plugin_v0.3.9_linux-amd64.s2plugin`。
+`4.0.0` 签名包已生成并通过脚本验签，包含 Linux amd64、Linux arm64 和 macOS arm64。AMD 宿主应优先下载 `sub2api-state-kit_plugin_v4.0.0_linux-amd64.s2plugin`。
 
-- `sub2api-state-kit_plugin_v0.3.9_linux-amd64.s2plugin` SHA256：`3350531065a7396a07d6cda5e30dc62da89fb14be5820a92021e87105acf8cdc`
-- `sub2api-state-kit_plugin_v0.3.9_linux-arm64.s2plugin` SHA256：`fb12ebbab558c20fdf8f444fa599eda707a95fc81b0f9c3097d3cbd8bfe4dc23`
-- `sub2api-state-kit_plugin_v0.3.9.s2plugin` SHA256：`3265f0be0f1deefd638e9fe56d2f1cade71a38ce51a15c368d909bb57d63b484`
+- `sub2api-state-kit_plugin_v4.0.0_linux-amd64.s2plugin` SHA256：`525c3ff7a04441de033555eee420c55ada4681614bb3a6ce6941bebb0104659b`
+- `sub2api-state-kit_plugin_v4.0.0_linux-arm64.s2plugin` SHA256：`fe34259835aac7a3da999f99edd11f0bc828c468841517180cf1f3f858a9b279`
+- `sub2api-state-kit_plugin_v4.0.0.s2plugin` SHA256：`be4497de53c37174d1a5f1ca7ee5fa4280a6edf729ed538b7e3a40ca41dcc3bb`
 
 发布私钥保存在仓库外，权限为 `0600`，未进入源码包、插件包或 Git 历史。最终附件摘要以 Release 的 `SHA256SUMS` 为准。
 

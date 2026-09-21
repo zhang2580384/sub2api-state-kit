@@ -38,6 +38,8 @@
           <label for="proxy-generator-blocked-countries">生成器阻止国家或地区</label>
           <input id="proxy-generator-blocked-countries" type="text" autocomplete="off" spellcheck="false" placeholder="HK, CN, RU">
           <p class="help">填写 ISO 两位国家代码，逗号分隔；香港 <code>HK</code> 始终保留，未知出口地区也会被拒绝并重新生成。</p>
+          <div class="inline-switch"><label class="switch-label" for="prefer-previous-ip"><input id="prefer-previous-ip" type="checkbox" role="switch"><span>优先复用账号上一轮可用出口 IP</span></label></div>
+          <p class="help">开启后，每个账号打票时先复用该账号上次通过复验的生成器出口；复用失败会自动回退到代理生成器获取新出口。旧值仍会重新检查地区、出口一致性和票据复验。</p>
           <p class="help">关闭并保存后停止票据获取与注入；正常请求继续转发。</p>
         </section>
 

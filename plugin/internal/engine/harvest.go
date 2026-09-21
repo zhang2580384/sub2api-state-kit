@@ -162,7 +162,15 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		reason = stopReason(status)
 		return
 	}
-	for attempt := 1; attempt <= c.MaxAttempts; attempt++ {
+	preferPrevious := c.PreferPreviousIP && a.EgressMode == egressModeGenerator
+	attemptLimit := c.MaxAttempts
+	if preferPrevious {
+		// Reusing the previous egress is an optimization attempt. It must not
+		// consume one of the configured generator acquisition attempts.
+		attemptLimit++
+	}
+	reusePrevious := preferPrevious
+	for attempt := 1; attempt <= attemptLimit; attempt++ {
 		if ctx.Err() != nil {
 			return
 		}
@@ -185,12 +193,18 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		case egressModePlugin:
 			targetProxyURL = a.StickyProxyURL
 		case egressModeGenerator:
-			targetProxyURL, err = e.generateProxy(ctx, c)
-			if err != nil {
-				reason = "generator_unavailable"
-				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-					UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
-				continue
+			if reusePrevious {
+				reusePrevious = false
+				targetProxyURL = e.preferredPreviousProxy(ctx, host, a.AccountID, k)
+			}
+			if targetProxyURL == "" {
+				targetProxyURL, err = e.generateProxy(ctx, c)
+				if err != nil {
+					reason = "generator_unavailable"
+					e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
+						UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
+					continue
+				}
 			}
 		default:
 			targetProxyURL, err = rotateProxy(c.DynamicProxyURL)
@@ -322,6 +336,9 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured,
 			ExpiresAt: captured.Add(time.Duration(effectiveTTLMinutes(c, a)) * time.Minute)}
 		if e.commit(ctx, host, c, a, model, k, gen, t, true) {
+			if generatorMode {
+				e.rememberPreviousEgress(ctx, host, a.AccountID, fixedProxyURL, captureEgress)
+			}
 			success = true
 			return
 		}
@@ -429,7 +446,13 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	}
 	event.Outcome = "accepted"
 	e.recordDiagnostic(event)
-	return e.commit(ctx, host, c, a, model, k, gen, &t, false), status
+	if !e.commit(ctx, host, c, a, model, k, gen, &t, false) {
+		return false, status
+	}
+	if a.EgressMode == egressModeGenerator {
+		e.rememberPreviousEgress(ctx, host, a.AccountID, t.GeneratedProxyURL, t.GeneratedEgressIP)
+	}
+	return true, status
 }
 func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, t *ticket, persist bool) bool {
 	e.persistMu.Lock()
