@@ -125,7 +125,7 @@ func TestStateKitOfficialHostPackageTrust(t *testing.T) {
 		got, err := stateKitContractInstaller(t, key).Install(context.Background(), bytes.NewReader(raw), nil)
 		require.NoError(t, err)
 		assert.Equal(t, stateKitContractPluginID, got.PluginKey)
-		assert.Equal(t, "4.2.0", got.Version)
+		assert.Equal(t, "4.2.1", got.Version)
 		assert.Equal(t, PluginSignatureTrusted, got.SignatureStatus)
 		assert.Equal(t, PluginStateDisabled, got.State)
 		assert.True(t, got.Compatibility.Compatible)

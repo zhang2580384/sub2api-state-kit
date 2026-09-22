@@ -147,7 +147,7 @@ func TestCookieConfigRejectsInvalidModesAndBounds(t *testing.T) {
 		`{"ticket_mode":"other"}`,
 		`{"cookie_capture_mode":"other"}`,
 		`{"cookie_ticket_ttl_seconds":29}`,
-		`{"standby_lead_seconds":301,"cookie_ticket_ttl_seconds":300}`,
+		`{"ticket_mode":"cookie","standby_lead_seconds":301,"cookie_ticket_ttl_seconds":300}`,
 		`{"enabled":true,"ticket_mode":"cookie","cookie_capture_mode":"socks5","accounts":[{"account_id":1,"enabled":true}]}`,
 		`{"enabled":true,"ticket_mode":"cookie","cookie_capture_mode":"generator","accounts":[{"account_id":1,"enabled":true}]}`,
 	} {

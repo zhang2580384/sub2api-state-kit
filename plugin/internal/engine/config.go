@@ -16,7 +16,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.2.0"
+const Version = "4.2.1"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -174,8 +174,11 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.StandbyLeadSeconds < 10 || c.StandbyLeadSeconds > 600 {
 		return c, errors.New("standby_lead_seconds must be 10..600")
 	}
-	if c.StandbyLeadSeconds >= c.CookieTicketTTLSeconds {
+	if c.TicketMode == ticketModeCookie && c.StandbyLeadSeconds >= c.CookieTicketTTLSeconds {
 		return c, errors.New("standby_lead_seconds must be less than cookie_ticket_ttl_seconds")
+	}
+	if c.TicketMode == ticketModeLegacy && c.StandbyLeadSeconds >= c.TTLMinutes*60 {
+		return c, errors.New("standby_lead_seconds must be less than ttl_minutes")
 	}
 	if err := validateProxy(c.UpstreamProxyURL); err != nil {
 		return c, err

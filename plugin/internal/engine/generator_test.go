@@ -135,7 +135,7 @@ func TestGeneratorEgressCollectionPersistenceAndRestore(t *testing.T) {
 	e := newGeneratorEngine()
 	apply(t, e, c)
 	waitFor(t, e, "ready")
-	if generatorCalls.Load() != 1 || probeHits.Load() != 2 || egressHits.Load() != 2 || geoHits.Load() != 1 {
+	if generatorCalls.Load() != 1 || probeHits.Load() != 2 || egressHits.Load() != 1 || geoHits.Load() != 1 {
 		t.Fatalf("unexpected generator flow calls generator=%d probe=%d egress=%d geo=%d",
 			generatorCalls.Load(), probeHits.Load(), egressHits.Load(), geoHits.Load())
 	}
@@ -159,7 +159,7 @@ func TestGeneratorEgressCollectionPersistenceAndRestore(t *testing.T) {
 	e2 := newGeneratorEngine()
 	apply(t, e2, c)
 	waitFor(t, e2, "ready")
-	if generatorCalls.Load() != 1 || probeHits.Load() != 3 || egressHits.Load() != 3 {
+	if generatorCalls.Load() != 1 || probeHits.Load() != 3 || egressHits.Load() != 2 {
 		t.Fatalf("restore generated another proxy: generator=%d probe=%d egress=%d",
 			generatorCalls.Load(), probeHits.Load(), egressHits.Load())
 	}
@@ -241,6 +241,207 @@ func TestGeneratorPreferPreviousIPReusesAccountEgress(t *testing.T) {
 	h.mu.Unlock()
 	if len(cached) == 0 || strings.Contains(string(cached), "test-token") {
 		t.Fatalf("previous egress cache missing or contains credentials: %s", cached)
+	}
+}
+
+func TestLegacyStandbyReusesCurrentGeneratedEgress(t *testing.T) {
+	h := testHost(42)
+	state := testState(292)
+	var generatorCalls, probeHits atomic.Int32
+	generatedProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = io.WriteString(w, `{"ip":"203.0.113.9"}`)
+		case "geo.test":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"203.0.113.9"}`)
+		default:
+			probeHits.Add(1)
+			w.Header().Set(StateHeader, state)
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer generatedProxy.Close()
+	generator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		generatorCalls.Add(1)
+		_, _ = fmt.Fprintln(w, strings.TrimPrefix(generatedProxy.URL, "http://"))
+	}))
+	defer generator.Close()
+
+	e := testEngine(t, h, "http://chatgpt.example/backend-api/codex/responses")
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(generatedProxy.URL, 42)
+	c.Accounts[0].EgressMode = egressModeGenerator
+	c.ProxyGeneratorURL = generator.URL
+	c.ProxyGeneratorTTLMinutes = 5
+	c.TTLMinutes = 5
+	c.RefreshBeforeSeconds = 30
+	c.MaxAttempts = 1
+	c.StandbyTicketEnabled = true
+	c.StandbyLeadSeconds = 60
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+
+	key := keyFor(42, "gpt-6-astra")
+	e.mu.Lock()
+	mainVersion := e.tickets[key].Version
+	mainProxy := e.tickets[key].GeneratedProxyURL
+	e.tickets[key].ExpiresAt = time.Now().Add(30 * time.Second)
+	e.mu.Unlock()
+	e.notify()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		e.mu.Lock()
+		standby := e.standbyTickets[key]
+		currentVersion := e.tickets[key].Version
+		e.mu.Unlock()
+		if standby != nil {
+			if currentVersion != mainVersion {
+				t.Fatal("standby preparation replaced the still-valid main ticket")
+			}
+			if standby.GeneratedProxyURL != mainProxy {
+				t.Fatalf("standby egress = %q; want current egress %q", standby.GeneratedProxyURL, mainProxy)
+			}
+			if generatorCalls.Load() != 1 {
+				t.Fatalf("standby preparation called generator %d times; want current egress reuse only", generatorCalls.Load())
+			}
+			if probeHits.Load() != 4 {
+				t.Fatalf("standby probe calls = %d; want initial capture/validation plus standby capture/validation", probeHits.Load())
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("legacy standby ticket was not prepared")
+}
+
+func TestLegacyStandbyFallsBackToNewEgressAfterCurrentFails(t *testing.T) {
+	h := testHost(42)
+	state := testState(292)
+	var standbyPhase, switchProxy atomic.Bool
+	var generatorCount atomic.Int32
+	firstProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = io.WriteString(w, `{"ip":"203.0.113.9"}`)
+		case "geo.test":
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"203.0.113.9"}`)
+		default:
+			if standbyPhase.Load() {
+				w.Header().Set(StateHeader, testState(312))
+			} else {
+				w.Header().Set(StateHeader, state)
+			}
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer firstProxy.Close()
+	secondProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = io.WriteString(w, `{"ip":"203.0.113.10"}`)
+		case "geo.test":
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"203.0.113.10"}`)
+		default:
+			w.Header().Set(StateHeader, state)
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer secondProxy.Close()
+	generator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		generatorCount.Add(1)
+		target := firstProxy.URL
+		if switchProxy.Load() {
+			target = secondProxy.URL
+		}
+		_, _ = fmt.Fprintln(w, strings.TrimPrefix(target, "http://"))
+	}))
+	defer generator.Close()
+
+	e := testEngine(t, h, "http://chatgpt.example/backend-api/codex/responses")
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(firstProxy.URL, 42)
+	c.Accounts[0].EgressMode = egressModeGenerator
+	c.ProxyGeneratorURL = generator.URL
+	c.ProxyGeneratorTTLMinutes = 5
+	c.TTLMinutes = 5
+	c.RefreshBeforeSeconds = 30
+	c.MaxAttempts = 1
+	c.AttemptIntervalSeconds = 10
+	c.StandbyTicketEnabled = true
+	c.StandbyLeadSeconds = 60
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+
+	key := keyFor(42, "gpt-6-astra")
+	e.mu.Lock()
+	mainProxy := e.tickets[key].GeneratedProxyURL
+	e.tickets[key].ExpiresAt = time.Now().Add(30 * time.Second)
+	e.mu.Unlock()
+	standbyPhase.Store(true)
+	switchProxy.Store(true)
+	e.notify()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		e.mu.Lock()
+		standby := e.standbyTickets[key]
+		e.mu.Unlock()
+		if standby != nil {
+			if standby.GeneratedProxyURL == mainProxy {
+				t.Fatal("standby did not fall back to a fresh generated egress")
+			}
+			if generatorCount.Load() != 2 {
+				t.Fatalf("generator calls = %d; want initial plus fallback", generatorCount.Load())
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("standby fallback did not produce a ticket")
+}
+
+func TestGeneratorRejectsIPChangeDuringSameEgressValidation(t *testing.T) {
+	h := testHost(42)
+	state := testState(292)
+	var egressHits atomic.Int32
+	generatedProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			egressHits.Add(1)
+			_, _ = io.WriteString(w, `{"ip":"203.0.113.10"}`)
+		case "geo.test":
+			_, _ = io.WriteString(w, `{"status":"success","countryCode":"US","query":"203.0.113.9"}`)
+		default:
+			w.Header().Set(StateHeader, state)
+			completed(w, "gpt-6-astra")
+		}
+	}))
+	defer generatedProxy.Close()
+	generator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, strings.TrimPrefix(generatedProxy.URL, "http://"))
+	}))
+	defer generator.Close()
+
+	e := testEngine(t, h, "http://chatgpt.example/backend-api/codex/responses")
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(generatedProxy.URL, 42)
+	c.Accounts[0].EgressMode = egressModeGenerator
+	c.ProxyGeneratorURL = generator.URL
+	c.MaxAttempts = 1
+	apply(t, e, c)
+	waitFor(t, e, "cooldown")
+	if egressHits.Load() != 1 {
+		t.Fatalf("validation IP checks = %d; want 1", egressHits.Load())
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if ticket := e.tickets[keyFor(42, "gpt-6-astra")]; ticket != nil {
+		t.Fatal("ticket with rotated validation egress was accepted")
 	}
 }
 

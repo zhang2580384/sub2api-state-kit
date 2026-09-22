@@ -10,10 +10,10 @@
     ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
     cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
     ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
-  const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '票据有效期'], refresh_before_seconds: [0, 3599, '提前续期'],
+  const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '旧模式票据有效期'], refresh_before_seconds: [0, 3599, '旧模式提前续期'],
     proxy_generator_ttl_minutes: [1, 180, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
-    cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], standby_lead_seconds: [10, 600, '备用票提前量'],
-    attempt_interval_seconds: [1, 300, '尝试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
+    cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], standby_lead_seconds: [10, 600, '备用票提前时间'],
+    attempt_interval_seconds: [1, 300, '常规重试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
     ready: ['可用', 'success'], renewing: ['可用 · 续期中', 'success'], cooldown: ['冷却中', 'warning'],
@@ -153,7 +153,7 @@
     validateGeneratorURL(config.proxy_generator_url);
     config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
     if (typeof config.prefer_previous_ip !== 'boolean') throw new Error('上一轮可用出口复用开关格式不正确。');
-    if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('票据模式须选择旧模式或 Cookie 分流模式。');
+    if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('运行方式须选择稳定同出口或 Cookie 分流。');
     if (!['generator', 'socks5'].includes(config.cookie_capture_mode)) throw new Error('Cookie 模式打票方式须选择代理生成器或 S5/HTTP 固定代理。');
     if (typeof config.standby_ticket_enabled !== 'boolean') throw new Error('备用票队列开关格式不正确。');
     Object.keys(NUMBERS).forEach(function (key) {
@@ -163,7 +163,12 @@
       }
     });
     if (config.refresh_before_seconds >= config.ttl_minutes * 60) throw new Error('提前续期必须小于票据有效期。');
-    if (config.standby_lead_seconds >= config.cookie_ticket_ttl_seconds) throw new Error('备用票提前量必须小于 Cookie 票据持续期。');
+    if (config.ticket_mode === 'cookie' && config.standby_lead_seconds >= config.cookie_ticket_ttl_seconds) {
+      throw new Error('备用票提前时间必须小于 Cookie 票据持续期。');
+    }
+    if (config.ticket_mode === 'legacy' && config.standby_lead_seconds >= config.ttl_minutes * 60) {
+      throw new Error('备用票提前时间必须小于旧模式票据有效期。');
+    }
     if (!Array.isArray(config.accounts) || config.accounts.length > 256) throw new Error('最多配置 256 个账号。');
     const ids = new Set();
     let totalModels = 0;
@@ -211,7 +216,7 @@
   function stateLabel(state) { return Object.prototype.hasOwnProperty.call(STATES, state) ? STATES[state] : ['未知状态', 'warning']; }
   function errorLabel(code) { return Object.prototype.hasOwnProperty.call(ERRORS, code) ? ERRORS[code] : '操作未完成，请检查账号与插件设置。'; }
   function diagnosticStageLabel(stage) {
-    return ({ capture: '采集票据', fixed_validation: '固定代理复验', restore: '恢复复验',
+    return ({ capture: '采集票据', fixed_validation: '同出口复验', restore: '恢复复验',
       ticket_lookup: '票据查询', business: '业务请求', business_result: '业务结果' })[stage] || '未知阶段';
   }
   function diagnosticOutcomeLabel(outcome) {
@@ -333,12 +338,16 @@
     function markDirty() { if (loaded) { dirty = true; updateSaveState(); } }
     function renderTicketMode() {
       const cookieMode = byID('ticket-mode').value === 'cookie';
+      const generatorCapture = !cookieMode || byID('cookie-capture-mode').value === 'generator';
       byID('legacy-mode-fields').hidden = cookieMode;
       byID('cookie-mode-fields').hidden = !cookieMode;
+      byID('cookie-socks5-fields').hidden = !cookieMode || generatorCapture;
+      byID('generator-fields').hidden = !generatorCapture;
+      byID('prefer-previous-fields').hidden = !generatorCapture;
       byID('cookie-capture-proxy-url').disabled = !cookieMode || byID('cookie-capture-mode').value !== 'socks5';
       byID('cookie-business-proxy-url').disabled = !cookieMode;
-      byID('standby-ticket-enabled').disabled = !cookieMode;
-      byID('standby-lead-seconds').disabled = !cookieMode || !byID('standby-ticket-enabled').checked;
+      byID('standby-ticket-enabled').disabled = false;
+      byID('standby-lead-seconds').disabled = !byID('standby-ticket-enabled').checked;
     }
     function setBusy(value) {
       busy = value;

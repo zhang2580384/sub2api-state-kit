@@ -13,6 +13,11 @@ import (
 
 const maxProxyGeneratorResponse = 64 << 10
 
+type egressInfo struct {
+	IP      string
+	Country string
+}
+
 // generateProxy asks the configured provider endpoint for one sticky proxy
 // endpoint. The request itself goes through the configured first-hop proxy.
 func (e *Engine) generateProxy(ctx context.Context, c Config) (string, error) {
@@ -65,6 +70,43 @@ func parseGeneratedProxy(body []byte) (string, error) {
 	return "", errors.New("proxy generator returned no usable host:port")
 }
 
+// lookupEgressInfo resolves the current IP and country through one generated
+// proxy. Keeping both values in one request avoids an extra public-IP round
+// trip during ticket renewal.
+func (e *Engine) lookupEgressInfo(ctx context.Context, proxyURL, upstreamProxyURL string) egressInfo {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	for _, template := range e.geoURLs {
+		endpoint := strings.ReplaceAll(template, "{ip}", "")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Set("User-Agent", "sub2api-state-kit-geo/2")
+		client, err := freshProbeClient(proxyURL, upstreamProxyURL)
+		if err != nil {
+			continue
+		}
+		response, err := client.Do(req)
+		if err != nil {
+			client.CloseIdleConnections()
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<10))
+		response.Body.Close()
+		client.CloseIdleConnections()
+		if readErr != nil || response.StatusCode != http.StatusOK {
+			continue
+		}
+		if info := parseEgressInfo(body, ""); info.IP != "" && info.Country != "" {
+			return info
+		}
+	}
+	return egressInfo{}
+}
+
 // lookupEgressCountry resolves the country of the generated egress IP through
 // the generated proxy. Unknown results are rejected by the caller.
 func (e *Engine) lookupEgressCountry(ctx context.Context, proxyURL, upstreamProxyURL, ip string) string {
@@ -104,17 +146,15 @@ func (e *Engine) lookupEgressCountry(ctx context.Context, proxyURL, upstreamProx
 	return ""
 }
 
-func parseEgressCountry(body []byte, expectedIP string) string {
+func parseEgressInfo(body []byte, expectedIP string) egressInfo {
 	var ipAPI struct {
 		Status      string `json:"status"`
 		CountryCode string `json:"countryCode"`
 		Query       string `json:"query"`
 	}
 	if json.Unmarshal(body, &ipAPI) == nil && ipAPI.Status == "success" &&
-		(ipAPI.Query == "" || ipAPI.Query == expectedIP) {
-		if code := normalizeCountryCode(ipAPI.CountryCode); code != "" {
-			return code
-		}
+		(expectedIP == "" || ipAPI.Query == "" || ipAPI.Query == expectedIP) {
+		return egressInfo{IP: safeEgressIP(ipAPI.Query), Country: normalizeCountryCode(ipAPI.CountryCode)}
 	}
 	var ipWho struct {
 		Success     bool   `json:"success"`
@@ -122,12 +162,14 @@ func parseEgressCountry(body []byte, expectedIP string) string {
 		IP          string `json:"ip"`
 	}
 	if json.Unmarshal(body, &ipWho) == nil && ipWho.Success &&
-		(ipWho.IP == "" || ipWho.IP == expectedIP) {
-		if code := normalizeCountryCode(ipWho.CountryCode); code != "" {
-			return code
-		}
+		(expectedIP == "" || ipWho.IP == "" || ipWho.IP == expectedIP) {
+		return egressInfo{IP: safeEgressIP(ipWho.IP), Country: normalizeCountryCode(ipWho.CountryCode)}
 	}
-	return ""
+	return egressInfo{}
+}
+
+func parseEgressCountry(body []byte, expectedIP string) string {
+	return parseEgressInfo(body, expectedIP).Country
 }
 
 func normalizeCountryCode(value string) string {

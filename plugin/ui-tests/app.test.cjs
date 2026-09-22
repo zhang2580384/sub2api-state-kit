@@ -85,14 +85,36 @@ test('cookie mode validates capture and business egress independently', () => {
   config.dynamic_proxy_url = '';
   assert.equal(ui.validateConfig(config), config);
   config.standby_lead_seconds = 300;
-  assert.throws(() => ui.validateConfig(config), /备用票提前量必须小于/);
+  assert.throws(() => ui.validateConfig(config), /备用票提前时间必须小于/);
   config.standby_lead_seconds = 90;
   config.cookie_capture_mode = 'generator';
   config.proxy_generator_url = '';
   assert.throws(() => ui.validateConfig(config), /请填写代理生成器地址/);
   config.proxy_generator_url = 'https://generator.example/gen?zone=custom';
   config.ticket_mode = 'other';
-  assert.throws(() => ui.validateConfig(config), /票据模式/);
+  assert.throws(() => ui.validateConfig(config), /运行方式/);
+});
+
+test('legacy mode supports standby tickets and always keeps the first-layer proxy visible', async () => {
+  const config = configured({ enabled: true, standby_ticket_enabled: true, standby_lead_seconds: 300, ttl_minutes: 10 });
+  config.accounts[0].enabled = true;
+  config.dynamic_proxy_url = 'socks5h://user-sid-{random}:placeholder@proxy.example:1080';
+  assert.doesNotThrow(() => ui.validateConfig(config));
+
+  const h = uiHarness(); await settle();
+  h.get('ticket-mode').value = 'cookie';
+  await h.get('ticket-mode').fire('change');
+  assert.equal(h.get('legacy-mode-fields').hidden, true);
+  assert.equal(h.get('upstream-proxy-id').hidden, false);
+  assert.equal(h.get('standby-ticket-enabled').disabled, false);
+  assert.equal(h.get('generator-fields').hidden, false);
+  assert.equal(h.get('cookie-socks5-fields').hidden, true);
+  h.get('cookie-capture-mode').value = 'socks5';
+  await h.get('cookie-capture-mode').fire('change');
+  assert.equal(h.get('generator-fields').hidden, true);
+  assert.equal(h.get('cookie-socks5-fields').hidden, false);
+  assert.equal(h.get('prefer-previous-fields').hidden, true);
+  h.runtime.stop();
 });
 
 test('account labels omit empty fields instead of showing placeholder text', () => {

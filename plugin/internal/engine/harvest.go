@@ -89,6 +89,9 @@ func (e *Engine) schedule() {
 			t := e.tickets[k]
 			if !validTicket(t, e.config, a, model, now) {
 				expectedFingerprint := proxyFingerprint(expectedBusinessProxyURL(e.config, a, ""))
+				if e.config.TicketMode == ticketModeLegacy && a.EgressMode == egressModeGenerator && t != nil {
+					expectedFingerprint = proxyFingerprint(t.GeneratedProxyURL)
+				}
 				if standby := e.standbyTickets[k]; validTicket(standby, e.config, a, model, now) &&
 					standbyMatches(standby, t, expectedFingerprint, "") {
 					e.tickets[k] = standby
@@ -100,7 +103,7 @@ func (e *Engine) schedule() {
 				}
 			} else {
 				lead := effectiveRefreshBefore(e.config, a)
-				standbyEnabled := e.config.TicketMode == ticketModeCookie && e.config.StandbyTicketEnabled
+				standbyEnabled := e.config.StandbyTicketEnabled
 				if standbyEnabled {
 					lead = time.Duration(e.config.StandbyLeadSeconds) * time.Second
 					if validTicket(e.standbyTickets[k], e.config, a, model, now) {
@@ -111,7 +114,7 @@ func (e *Engine) schedule() {
 					continue
 				}
 			}
-			standby := e.config.TicketMode == ticketModeCookie && e.config.StandbyTicketEnabled && validTicket(t, e.config, a, model, now)
+			standby := e.config.StandbyTicketEnabled && validTicket(t, e.config, a, model, now)
 			if !validTicket(t, e.config, a, model, now) {
 				standby = false
 			}
@@ -194,8 +197,15 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		generatorCapture = c.CookieCaptureMode == captureModeGenerator
 	}
 	preferPrevious := c.PreferPreviousIP && generatorCapture
+	reuseCurrentEgress := false
+	if standby && !cookieMode && generatorCapture {
+		e.mu.Lock()
+		current := e.tickets[k]
+		e.mu.Unlock()
+		reuseCurrentEgress = validTicket(current, c, a, model, time.Now())
+	}
 	attemptLimit := c.MaxAttempts
-	if preferPrevious {
+	if preferPrevious || reuseCurrentEgress {
 		// Reusing the previous egress is an optimization attempt. It must not
 		// consume one of the configured generator acquisition attempts.
 		attemptLimit++
@@ -206,9 +216,14 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			return
 		}
 		e.note(k, gen, attempt, "")
+		attemptStarted := time.Now()
 		if attempt > 1 {
+			delay := time.Duration(c.AttemptIntervalSeconds) * time.Second
+			if fastRetryReason(reason) && delay > time.Second {
+				delay = time.Second
+			}
 			select {
-			case <-time.After(time.Duration(c.AttemptIntervalSeconds) * time.Second):
+			case <-time.After(delay):
 			case <-ctx.Done():
 				return
 			}
@@ -220,6 +235,19 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		targetProxyURL := ""
 		upstreamProxyURL := c.UpstreamProxyURL
+		if reuseCurrentEgress {
+			e.mu.Lock()
+			current := e.tickets[k]
+			e.mu.Unlock()
+			if validTicket(current, c, a, model, time.Now()) {
+				targetProxyURL = current.GeneratedProxyURL
+			}
+			// Reuse one working egress to avoid an unnecessary generator call.
+			// If it cannot produce another ticket, the next attempt must obtain
+			// a fresh egress instead of retrying the same bad endpoint.
+			reuseCurrentEgress = false
+			reusePrevious = false
+		}
 		if cookieMode {
 			if c.CookieCaptureMode == captureModeSOCKS5 {
 				targetProxyURL = c.CookieCaptureProxyURL
@@ -233,7 +261,8 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 					if err != nil {
 						reason = "generator_unavailable"
 						e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
+							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason,
+							DurationMS: time.Since(attemptStarted).Milliseconds()})
 						continue
 					}
 				}
@@ -252,7 +281,8 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 					if err != nil {
 						reason = "generator_unavailable"
 						e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
+							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason,
+							DurationMS: time.Since(attemptStarted).Milliseconds()})
 						continue
 					}
 				}
@@ -268,14 +298,15 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		captureEgress := ""
 		captureCountry := ""
 		if cookieMode || generatorMode {
-			captureEgress = e.lookupEgressIPRequired(ctx, targetProxyURL, upstreamProxyURL)
+			info := e.lookupEgressInfo(ctx, targetProxyURL, upstreamProxyURL)
+			captureEgress = info.IP
+			captureCountry = info.Country
 			if captureEgress == "" {
 				reason = "generator_egress_unavailable"
 				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
 					UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, Outcome: "egress_unavailable", Error: reason})
 				continue
 			}
-			captureCountry = e.lookupEgressCountry(ctx, targetProxyURL, upstreamProxyURL, captureEgress)
 			if countryBlocked(captureCountry, c.ProxyGeneratorBlockedCountries) {
 				reason = "generator_region_blocked"
 				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
@@ -284,7 +315,6 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			}
 		}
 		captured := time.Now()
-		captureStarted := time.Now()
 		sessionID := randomID()
 		cookies := map[string]string{}
 		captureResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "", sessionID, cookies)
@@ -296,7 +326,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		captureEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
 			UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, CaptureEgress: captureEgress,
 			StateLength: len(candidate), StateClass: stateDiagnosticClass(candidate), ResponseModel: captureModel,
-			HTTPStatus: status, DurationMS: time.Since(captureStarted).Milliseconds()}
+			HTTPStatus: status, DurationMS: time.Since(attemptStarted).Milliseconds()}
 		if err != nil {
 			reason = "harvest_failed"
 			captureEvent.Outcome = "probe_failed"
@@ -319,6 +349,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		// Resolve fresh credentials again and validate through the same account
 		// egress that will serve business traffic. Proxy credentials are never
 		// copied into the ticket.
+		validationStarted := time.Now()
 		fixed, err := resolveIdentity(ctx, host, a.AccountID)
 		if err != nil {
 			reason = "identity_unavailable"
@@ -337,10 +368,26 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 				return
 			}
 		}
-		validationStarted := time.Now()
-		fixedEgress := e.lookupEgressIP(ctx, fixedProxyURL, fixedUpstreamProxyURL)
-		if cookieMode || generatorMode {
+		fixedEgress := ""
+		fixedCountry := ""
+		sameEgressPath := fixedProxyURL == targetProxyURL && fixedUpstreamProxyURL == upstreamProxyURL
+		if sameEgressPath {
+			fixedEgress = captureEgress
+			fixedCountry = captureCountry
+		}
+		if generatorMode && !cookieMode && sameEgressPath {
+			// The proxy address is sticky, but a rotated exit would silently break
+			// the same-IP contract. Verify the IP again without repeating the
+			// country lookup.
 			fixedEgress = e.lookupEgressIPRequired(ctx, fixedProxyURL, fixedUpstreamProxyURL)
+		}
+		if (cookieMode || generatorMode) && fixedEgress == "" {
+			info := e.lookupEgressInfo(ctx, fixedProxyURL, fixedUpstreamProxyURL)
+			fixedEgress = info.IP
+			fixedCountry = info.Country
+		}
+		if !cookieMode && !generatorMode {
+			fixedEgress = e.lookupEgressIP(ctx, fixedProxyURL, fixedUpstreamProxyURL)
 		}
 		validationEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "fixed_validation", Attempt: attempt,
 			UpstreamProxy: fixedUpstreamProxyURL, TargetProxy: fixedProxyURL, CaptureEgress: captureEgress, FixedEgress: fixedEgress,
@@ -353,7 +400,6 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			continue
 		}
 		if cookieMode {
-			fixedCountry := e.lookupEgressCountry(ctx, fixedProxyURL, fixedUpstreamProxyURL, fixedEgress)
 			if countryBlocked(fixedCountry, c.ProxyGeneratorBlockedCountries) {
 				reason = "business_region_blocked"
 				validationEvent.Outcome = "region_blocked"
@@ -423,6 +469,15 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 	}
 }
 func isStopStatus(status int) bool { return status == 401 || status == 403 || status == 429 }
+func fastRetryReason(reason string) bool {
+	switch reason {
+	case "generator_region_blocked", "business_region_blocked", "sticky_egress_changed",
+		"unexpected_state_length", "fixed_proxy_validation_failed", "cookie_session_incomplete":
+		return true
+	default:
+		return false
+	}
+}
 func stopReason(status int) string {
 	switch status {
 	case 401:

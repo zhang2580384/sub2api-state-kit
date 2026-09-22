@@ -23,49 +23,53 @@
       <fieldset id="config-fields" disabled>
         <section class="card">
           <div class="section-heading">
-            <div><h2>总开关与代理链路</h2><p class="muted">总开关和账号开关均开启时，该账号才会获取、使用票据。</p></div>
+            <div><h2>启用与运行方式</h2><p class="muted">总开关和账号开关均开启时，该账号才会获取、使用票据。</p></div>
             <label class="switch-label"><input id="enabled" type="checkbox" role="switch"><span>启用 STATE Kit</span></label>
           </div>
-          <label for="ticket-mode">票据模式</label>
+          <label for="ticket-mode">运行方式</label>
           <select id="ticket-mode">
-            <option value="legacy">旧模式：第一层 + 生成器，打票与业务使用同一出口 IP</option>
-            <option value="cookie">Cookie 分流模式：打票与业务出口分离，用 Cookie 保持会话</option>
+            <option value="legacy">稳定同出口（推荐）：打票和用票保持同一粘性 IP</option>
+            <option value="cookie">Cookie 分流：打票和业务可以使用不同出口</option>
           </select>
-          <p class="help">旧模式要求采集、复验、业务请求始终走同一个生成粘性出口，适合先前的 180 分钟同出口方案。Cookie 分流模式会在采集阶段保存响应 Cookie 和 <code>session_id</code>，业务请求再通过独立业务出口发送这些会话信息；因此打票出口和业务出口不再强制相同。</p>
+          <p id="ticket-mode-help" class="help">固定出口适合已验证的粘性 IP；Cookie 分流允许业务使用另一个出口。</p>
+          <label for="upstream-proxy-id">第一层：IP 管理代理（两种方式共用）</label>
+          <select id="upstream-proxy-id"><option value="0">不使用第一层</option></select>
+          <p id="upstream-proxy-help" class="help">用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。</p>
           <div id="legacy-mode-fields">
-            <label for="upstream-proxy-id">第一层：IP 管理代理</label>
-            <select id="upstream-proxy-id"><option value="0">不使用第一层，动态代理直连</option></select>
-            <p id="upstream-proxy-help" class="help">旧模式下，第一层会先连接生成器返回的第二层代理，采集、复验和业务请求共用同一个出口。Cookie 分流模式下，若没有单独填写业务固定代理，业务请求会使用这里的第一层作为出口。</p>
-            <label for="dynamic-proxy-url">第二层：动态代理地址（仅旧模式 Sub2 原有代理）</label>
+            <label for="dynamic-proxy-url">第二层：Sub2 原有动态代理</label>
             <div class="input-action"><input id="dynamic-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="填写动态代理地址"><button id="toggle-proxy" type="button" class="secondary" aria-controls="dynamic-proxy-url" aria-pressed="false">显示</button></div>
-            <p class="help">支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。地址中的 <code>{random}</code> 或 <code>{sid}</code> 在每次尝试时替换为随机会话值。请填写自己的代理，不在此处填写账号 Token。</p>
+            <p class="help">仅账号出口方式选“Sub2 原有代理”时使用。支持 <code>{random}</code> 或 <code>{sid}</code>。</p>
           </div>
           <div id="cookie-mode-fields" hidden>
-            <label for="cookie-capture-mode">Cookie 模式打票方式</label>
+            <label for="cookie-capture-mode">Cookie 打票方式</label>
             <select id="cookie-capture-mode">
-              <option value="generator">代理生成器 API：每次获取一个可复用的粘性出口</option>
-              <option value="socks5">S5/HTTP 固定采集代理：直接使用下面的采集代理打票</option>
-            </select>
-            <p class="help">打票方式只决定 Cookie 会话从哪里取得。生成器模式可配合“优先复用上一轮出票 IP”；S5/HTTP 固定采集代理模式适合已有固定采集链路的场景。两条链路都会先检查出口国家/地区，香港和未知地区会被拒绝。</p>
-            <label for="cookie-capture-proxy-url">Cookie 模式采集代理</label>
-            <input id="cookie-capture-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="socks5h://user:pass@capture.example:1080">
-            <p class="help">支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。选择打票方式为 S5/HTTP 时必填；如果同时配置了第一层代理，连接顺序为第一层 → 采集代理 → ChatGPT。生成器模式不需要填写此字段。</p>
+            <option value="generator">代理生成器 API：每次获取一个可复用的粘性出口</option>
+            <option value="socks5">S5/HTTP 固定采集代理：直接使用下面的采集代理打票</option>
+          </select>
+            <p class="help">只决定 Cookie 会话从哪里取得；香港和未知地区始终拒绝。</p>
+            <div id="cookie-socks5-fields" hidden>
+              <label for="cookie-capture-proxy-url">打票采集代理</label>
+              <input id="cookie-capture-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="socks5h://user:pass@capture.example:1080">
+              <p class="help">支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。</p>
+            </div>
             <label for="cookie-business-proxy-url">Cookie 模式业务固定代理</label>
             <input id="cookie-business-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="留空则使用第一层代理">
-            <p class="help">业务请求的出口。留空时使用第一层 IP 管理代理；也可以填写独立的 HTTP/HTTPS/SOCKS5/SOCKS5H 业务代理。这里不再要求与采集出口相同，但仍会拒绝香港和未知地区。</p>
-            <div class="inline-switch"><label class="switch-label" for="standby-ticket-enabled"><input id="standby-ticket-enabled" type="checkbox" role="switch"><span>启用备用票队列</span></label></div>
-            <p class="help">开启后，当前票据剩余时间小于“备用票提前量”时，插件会在后台获取一张新票据并放入备用票槽；当前票失效或被上游判定为 312/模型不符后，备用票会自动顶替，避免业务请求等待新票据。备用票只保留一张，验证成功前不会替换当前票。</p>
+            <p class="help">留空使用第一层；可与打票出口不同。</p>
           </div>
-          <label for="proxy-generator-url">代理生成器 API</label>
-          <input id="proxy-generator-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://example.com/gen?zone=custom&sessType=sticky">
-          <p class="help">旧模式下，插件通过第一层代理调用此 API，读取返回的 <code>host:port</code>，并在采集、复验和业务转发期间固定使用该出口。Cookie 模式的打票方式选择“代理生成器 API”时，生成出口只用于采集和复验，业务请求改走上面配置的业务固定代理或第一层。</p>
-          <p class="help">B2Proxy 使用 180 分钟粘性 IP 时，请把“提前更换 IP”设为“否”并保留 <code>sessTime=180&amp;sessAuto=0</code>；<code>sessAuto=1</code> 可能在会话中途更换出口。</p>
-          <label for="proxy-generator-blocked-countries">生成器阻止国家或地区</label>
+          <div id="generator-fields">
+            <label for="proxy-generator-url">代理生成器 API</label>
+            <input id="proxy-generator-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://example.com/gen?zone=custom&sessType=sticky">
+            <p class="help">固定出口下同时用于打票和业务；B2Proxy 固定 180 分钟时保留 <code>sessTime=180&amp;sessAuto=0</code>。</p>
+          </div>
+          <label for="proxy-generator-blocked-countries">禁止出口国家或地区</label>
           <input id="proxy-generator-blocked-countries" type="text" autocomplete="off" spellcheck="false" placeholder="HK, CN, RU">
-          <p class="help">填写 ISO 两位国家代码，逗号分隔；香港 <code>HK</code> 始终保留，未知出口地区也会被拒绝并重新生成。</p>
-          <div class="inline-switch"><label class="switch-label" for="prefer-previous-ip"><input id="prefer-previous-ip" type="checkbox" role="switch"><span>优先使用上一轮出票 IP 再次打票</span></label></div>
-          <p class="help">开启后，每个账号打票时先复用该账号上次通过复验的生成器出口 IP；复用失败会自动回退到代理生成器获取新出口。旧模式下仍会重新检查采集/业务出口一致性；Cookie 模式下会检查采集出口地区，并重新完成 Cookie 会话复验。</p>
-          <p class="help">关闭并保存后停止票据获取与注入；正常请求继续转发。</p>
+          <p class="help">ISO 两位代码，逗号分隔。香港 <code>HK</code> 和未知地区始终拒绝。</p>
+          <div id="prefer-previous-fields">
+            <div class="inline-switch"><label class="switch-label" for="prefer-previous-ip"><input id="prefer-previous-ip" type="checkbox" role="switch"><span>优先复用上一张票的出口</span></label></div>
+            <p class="help">失败后自动获取新出口。</p>
+          </div>
+          <div class="inline-switch"><label class="switch-label" for="standby-ticket-enabled"><input id="standby-ticket-enabled" type="checkbox" role="switch"><span>提前准备备用票</span></label></div>
+          <p class="help">新票验证完成前不替换当前票；当前票失效或收到 312 后自动顶替。</p>
         </section>
 
         <section class="card">
@@ -76,7 +80,7 @@
             <button id="add-account" type="button" class="secondary">添加账号</button>
           </div>
           <p id="account-discovery" class="help">名称、邮箱、到期时间和额度会从账号管理同步；同步不可用时仅显示账号 ID。</p>
-          <div class="table-wrap"><table class="accounts-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号资料</th><th scope="col">开关</th><th scope="col">旧模式出口</th><th scope="col">账号粘性代理</th><th scope="col">套餐 / 票据</th><th scope="col">模型</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="accounts-body"></tbody></table></div>
+          <div class="table-wrap"><table class="accounts-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号资料</th><th scope="col">开关</th><th scope="col">出口方式</th><th scope="col">账号粘性代理</th><th scope="col">套餐 / 票据</th><th scope="col">模型</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="accounts-body"></tbody></table></div>
           <p id="accounts-empty" class="empty">尚未添加账号。添加后选择出口模式、套餐和模型，再手动开启。</p>
           <p class="help">Sub2 原有代理保持宿主行为；账号粘性代理模式使用你填写的固定 session；代理生成器模式由插件调用 API 取得固定 <code>host:port</code>。粘性代理不接受 <code>{random}</code> 或 <code>{sid}</code>；从聊天复制的 <code>\@</code> 请改成普通 <code>@</code>。</p>
           <p class="help">Pro 对应 292，Team 对应 332。模型框可从常用模型中选择，也可直接输入自定义名称；多个模型用英文逗号分隔。</p>
@@ -86,16 +90,16 @@
         <details class="card advanced">
           <summary>高级参数 <span class="muted">通常保持默认即可</span></summary>
           <div class="field-grid">
-            <div><label for="ttl-minutes">票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="180" value="180" required></div>
-            <div><label for="refresh-before-seconds">提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="120" required></div>
+            <div><label for="ttl-minutes">旧模式票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="180" value="180" required></div>
+            <div><label for="refresh-before-seconds">旧模式提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="120" required></div>
             <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="180" value="180" required></div>
             <div><label for="cookie-ticket-ttl-seconds">Cookie 票据持续期（秒）</label><input id="cookie-ticket-ttl-seconds" type="number" min="30" max="1800" value="300" required></div>
-            <div><label for="standby-lead-seconds">备用票提前量（秒）</label><input id="standby-lead-seconds" type="number" min="10" max="600" value="90" required></div>
+            <div><label for="standby-lead-seconds">备用票提前时间（秒）</label><input id="standby-lead-seconds" type="number" min="10" max="600" value="90" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
-            <div><label for="attempt-interval-seconds">尝试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
+            <div><label for="attempt-interval-seconds">常规重试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>
           </div>
-          <p class="help">旧模式使用“票据有效期”和“提前续期”；Cookie 模式使用秒级“Cookie 票据持续期”，默认 300 秒接近实测的 292 生命周期。提前续期或备用票采集运行时，旧票据仍然可用，新票据验证成功后才会替换。备用票提前量必须小于 Cookie 票据持续期。</p>
+          <p class="help">生成出口被地区过滤时会立即换出口，不等待常规重试间隔。新票通过同出口复验并保存成功后才进入可用状态；续期期间旧票继续服务。</p>
         </details>
       </fieldset>
 
