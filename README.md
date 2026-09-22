@@ -48,3 +48,11 @@ sub2api-state-kit_plugin_v4.1.0_linux-amd64.s2plugin
 - [最新 Release](https://github.com/zhang2580384/sub2api-state-kit/releases/latest)
 
 插件不包含账号、代理凭据、API Key、STATE、数据库或签名私钥。上游 Overload、429 和模型策略变化仍可能影响可用性。
+以下是测试效果图：
+<img width="1253" height="846" alt="20b343416fddf9f23b62cfc3857bb731" src="https://github.com/user-attachments/assets/ca5d1e7c-6c4f-41b7-a545-b0167b5c088c" />
+<img width="820" height="583" alt="b7482e5dc0cc0d07fdd360a92d9b9f44" src="https://github.com/user-attachments/assets/2531ea91-2f2b-482b-a4ea-3a620ef07c93" />
+界面设置图
+<img width="1104" height="314" alt="image" src="https://github.com/user-attachments/assets/dfb5ad7d-3cee-4692-9bac-3b00441f5f24" />
+<img width="1089" height="527" alt="image" src="https://github.com/user-attachments/assets/88a04eec-5548-44b3-a1fc-cf15e47762b3" />
+
+只要支持粘性ip的都可以，但是最低要10分钟以上支持api提取的才行，必须加第一层代理的白名单才能使用，如果宿主机在国外应该是不用第一层代理的。
