@@ -7,9 +7,12 @@
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
+    ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
+    cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
     ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
   const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '票据有效期'], refresh_before_seconds: [0, 3599, '提前续期'],
     proxy_generator_ttl_minutes: [1, 180, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
+    cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], standby_lead_seconds: [10, 600, '备用票提前量'],
     attempt_interval_seconds: [1, 300, '尝试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
@@ -23,6 +26,8 @@
     fixed_proxy_validation_failed: '票据未通过账号业务代理验证', sticky_egress_changed: '账号粘性代理出口发生变化',
     generator_unavailable: '代理生成器暂时不可用', generator_egress_unavailable: '生成器出口暂时不可用',
     generator_region_blocked: '生成器出口位于阻止地区，正在重试',
+    business_egress_unavailable: 'Cookie 业务出口暂时不可用', business_region_blocked: 'Cookie 业务出口位于阻止地区',
+    cookie_session_incomplete: 'Cookie 会话不完整，正在重新获取',
     ticket_persistence_failed: '票据保存失败', upstream_unauthorized: '上游拒绝授权（401）', upstream_forbidden: '上游拒绝访问（403）',
     upstream_rate_limited: '上游限流（429）', upstream_rejected: '上游拒绝请求', model_mismatch: '返回模型不匹配，正在重新获取票据',
     state_312: '收到 312 状态，正在重新获取票据', model_mismatch_persistence_failed: '返回模型不匹配，票据失效记录保存失败',
@@ -142,10 +147,15 @@
     if (proxyID(config.upstream_proxy_id) === null) throw new Error('第一层代理编号格式不正确。');
     validateProxyAddress(config.upstream_proxy_url, '第一层代理');
     validateProxyAddress(config.dynamic_proxy_url, '动态代理');
+    validateProxyAddress(config.cookie_capture_proxy_url, 'Cookie 模式采集代理');
+    validateProxyAddress(config.cookie_business_proxy_url, 'Cookie 模式业务固定代理');
     config.proxy_generator_url = typeof config.proxy_generator_url === 'string' ? config.proxy_generator_url.trim() : '';
     validateGeneratorURL(config.proxy_generator_url);
     config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
     if (typeof config.prefer_previous_ip !== 'boolean') throw new Error('上一轮可用出口复用开关格式不正确。');
+    if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('票据模式须选择旧模式或 Cookie 分流模式。');
+    if (!['generator', 'socks5'].includes(config.cookie_capture_mode)) throw new Error('Cookie 模式打票方式须选择代理生成器或 S5/HTTP 固定代理。');
+    if (typeof config.standby_ticket_enabled !== 'boolean') throw new Error('备用票队列开关格式不正确。');
     Object.keys(NUMBERS).forEach(function (key) {
       const bounds = NUMBERS[key];
       if (!Number.isInteger(config[key]) || config[key] < bounds[0] || config[key] > bounds[1]) {
@@ -153,6 +163,7 @@
       }
     });
     if (config.refresh_before_seconds >= config.ttl_minutes * 60) throw new Error('提前续期必须小于票据有效期。');
+    if (config.standby_lead_seconds >= config.cookie_ticket_ttl_seconds) throw new Error('备用票提前量必须小于 Cookie 票据持续期。');
     if (!Array.isArray(config.accounts) || config.accounts.length > 256) throw new Error('最多配置 256 个账号。');
     const ids = new Set();
     let totalModels = 0;
@@ -182,11 +193,15 @@
       });
     });
     if (totalModels > 1024) throw new Error('最多配置 1024 个账号与模型组合。');
-    if (config.enabled && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'sub2'; }) && !config.dynamic_proxy_url) {
+    if (config.enabled && config.ticket_mode === 'legacy' && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'sub2'; }) && !config.dynamic_proxy_url) {
       throw new Error('启用 Sub2 原有代理模式的账号前，请填写动态代理地址。');
     }
-    if (config.enabled && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'generator'; }) && !config.proxy_generator_url) {
+    if (config.enabled && config.ticket_mode === 'legacy' && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'generator'; }) && !config.proxy_generator_url) {
       throw new Error('启用代理生成器出口模式的账号前，请填写代理生成器地址。');
+    }
+    if (config.enabled && config.ticket_mode === 'cookie' && config.accounts.some(function (account) { return account.enabled; })) {
+      if (config.cookie_capture_mode === 'socks5' && !config.cookie_capture_proxy_url) throw new Error('Cookie 模式选择 S5/HTTP 固定采集代理时，请填写采集代理。');
+      if (config.cookie_capture_mode === 'generator' && !config.proxy_generator_url) throw new Error('Cookie 模式选择代理生成器打票时，请填写代理生成器地址。');
     }
     if (config.upstream_proxy_id > 0 && !config.upstream_proxy_url) {
       throw new Error('所选第一层代理缺少可用的代理地址。');
@@ -297,6 +312,7 @@
     let savedUpstreamProxyURL = '';
     const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_seconds: 'refresh-before-seconds',
       proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
+      cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', standby_lead_seconds: 'standby-lead-seconds',
       max_attempts: 'max-attempts', attempt_interval_seconds: 'attempt-interval-seconds', cooldown_seconds: 'cooldown-seconds' };
     function element(tag, text, className) {
       const node = document.createElement(tag);
@@ -315,6 +331,15 @@
       byID('save-state').className = dirty ? 'dirty' : 'muted';
     }
     function markDirty() { if (loaded) { dirty = true; updateSaveState(); } }
+    function renderTicketMode() {
+      const cookieMode = byID('ticket-mode').value === 'cookie';
+      byID('legacy-mode-fields').hidden = cookieMode;
+      byID('cookie-mode-fields').hidden = !cookieMode;
+      byID('cookie-capture-proxy-url').disabled = !cookieMode || byID('cookie-capture-mode').value !== 'socks5';
+      byID('cookie-business-proxy-url').disabled = !cookieMode;
+      byID('standby-ticket-enabled').disabled = !cookieMode;
+      byID('standby-lead-seconds').disabled = !cookieMode || !byID('standby-ticket-enabled').checked;
+    }
     function setBusy(value) {
       busy = value;
       byID('config-fields').disabled = !loaded || busy;
@@ -491,12 +516,18 @@
       savedUpstreamProxyURL = config.upstream_proxy_url;
       renderProxyOptions(savedUpstreamProxyID);
       byID('dynamic-proxy-url').value = config.dynamic_proxy_url;
+      byID('ticket-mode').value = config.ticket_mode;
+      byID('cookie-capture-mode').value = config.cookie_capture_mode;
+      byID('cookie-capture-proxy-url').value = config.cookie_capture_proxy_url;
+      byID('cookie-business-proxy-url').value = config.cookie_business_proxy_url;
+      byID('standby-ticket-enabled').checked = config.standby_ticket_enabled === true;
       byID('proxy-generator-url').value = config.proxy_generator_url;
       byID('proxy-generator-blocked-countries').value = config.proxy_generator_blocked_countries.join(', ');
       byID('prefer-previous-ip').checked = config.prefer_previous_ip === true;
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
       accounts = config.accounts.map(mergeHostAccountMetadata);
       renderAccounts();
+      renderTicketMode();
       dirty = false;
       updateSaveState();
     }
@@ -514,6 +545,11 @@
         upstream_proxy_id: selectedProxyID === null ? NaN : selectedProxyID,
         upstream_proxy_url: upstreamProxyURL,
         dynamic_proxy_url: byID('dynamic-proxy-url').value.trim(),
+        ticket_mode: byID('ticket-mode').value,
+        cookie_capture_mode: byID('cookie-capture-mode').value,
+        cookie_capture_proxy_url: byID('cookie-capture-proxy-url').value.trim(),
+        cookie_business_proxy_url: byID('cookie-business-proxy-url').value.trim(),
+        standby_ticket_enabled: byID('standby-ticket-enabled').checked,
         proxy_generator_url: byID('proxy-generator-url').value.trim(),
         proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean),
         prefer_previous_ip: byID('prefer-previous-ip').checked
@@ -546,11 +582,13 @@
         const model = typeof ticket.model === 'string' && MODEL_PATTERN.test(ticket.model) ? ticket.model : '未知模型';
         account.appendChild(element('span', '账号：' + id + (info.name ? ' · ' + info.name : ''), 'status-account'));
         account.appendChild(element('span', '模型：' + model, 'status-model')); row.appendChild(account);
-        row.appendChild(element('td', ticket.plan === 'team' ? 'Team · 332' : ticket.plan === 'pro' ? 'Pro · 292' : '—'));
+        const plan = ticket.plan === 'team' ? 'Team · 332' : ticket.plan === 'pro' ? 'Pro · 292' : '—';
+        row.appendChild(element('td', plan + ' · ' + (ticket.ticket_mode === 'cookie' ? 'Cookie 分流' : '旧模式')));
         const state = stateLabel(ticket.state); const stateCell = element('td');
         stateCell.appendChild(element('span', state[0], 'badge ' + state[1])); row.appendChild(stateCell);
         const remaining = element('td', remainingText(ticket.remaining_seconds));
         if (typeof ticket.expires_at === 'string' && Number.isFinite(Date.parse(ticket.expires_at))) remaining.title = '到期时间：' + new Date(ticket.expires_at).toLocaleString('zh-CN');
+        if (ticket.standby_ready === true) remaining.appendChild(element('div', '备用票：' + remainingText(ticket.standby_remaining_seconds), 'help'));
         row.appendChild(remaining);
         const attempts = Number.isSafeInteger(ticket.attempts) && ticket.attempts > 0 ? '本轮尝试 ' + ticket.attempts + ' 次' : '—';
         const detail = element('td', attempts, 'error-detail');
@@ -616,6 +654,9 @@
     }
     byID('config-form').addEventListener('input', markDirty);
     byID('config-form').addEventListener('change', markDirty);
+    byID('ticket-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
+    byID('cookie-capture-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
+    byID('standby-ticket-enabled').addEventListener('change', function () { renderTicketMode(); markDirty(); });
     async function saveConfig(event) {
       event.preventDefault(); if (busy || !loaded) return;
       let config;

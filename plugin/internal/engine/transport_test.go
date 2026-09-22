@@ -296,6 +296,12 @@ func TestForwardInjectsTicketAndInvalidatesOnModelMismatch(t *testing.T) {
 		if len(values) != 1 || values[0] != state {
 			t.Error("ticket replacement failed")
 		}
+		if values := r.Header.Values("Cookie"); len(values) != 1 || values[0] != "caller=legacy" {
+			t.Error("legacy ticket mode did not preserve caller cookies")
+		}
+		if values := r.Header.Values("session_id"); len(values) != 1 || values[0] != "caller-session" {
+			t.Error("legacy ticket mode did not preserve caller session_id")
+		}
 		if values := r.Header.Values("Accept-Encoding"); len(values) != 1 || values[0] != "identity" {
 			t.Error("ticket response did not negotiate inspectable uncompressed bytes")
 		}
@@ -306,6 +312,8 @@ func TestForwardInjectsTicketAndInvalidatesOnModelMismatch(t *testing.T) {
 	start := mockStart(server.URL, true, int64(len(body)))
 	start.Headers[StateHeader] = &pluginv1.HeaderValues{Values: []string{"old"}}
 	start.Headers["X-Codex-Turn-State"] = &pluginv1.HeaderValues{Values: []string{"other-old"}}
+	start.Headers["Cookie"] = &pluginv1.HeaderValues{Values: []string{"caller=legacy"}}
+	start.Headers["session_id"] = &pluginv1.HeaderValues{Values: []string{"caller-session"}}
 	start.Headers["Accept-Encoding"] = &pluginv1.HeaderValues{Values: []string{"gzip"}}
 	start.Headers["accept-encoding"] = &pluginv1.HeaderValues{Values: []string{"br"}}
 	if err := e.Forward(fixedStream(start, body)); err != nil {

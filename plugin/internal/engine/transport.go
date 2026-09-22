@@ -327,14 +327,24 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		req.ContentLength = 0
 	}
 	if ticket != nil {
+		cookieMode := ticket.TicketMode == ticketModeCookie
 		// Remove differently cased map keys as well; Set alone canonicalizes only
 		// the new key and could leave a caller-supplied duplicate header intact.
 		for key := range req.Header {
-			if strings.EqualFold(key, StateHeader) || strings.EqualFold(key, "Accept-Encoding") {
+			if strings.EqualFold(key, StateHeader) || strings.EqualFold(key, "Accept-Encoding") ||
+				cookieMode && (strings.EqualFold(key, "Cookie") || strings.EqualFold(key, "session_id")) {
 				delete(req.Header, key)
 			}
 		}
 		req.Header.Set(StateHeader, ticket.State)
+		if cookieMode {
+			if ticket.SessionID != "" {
+				req.Header.Set("session_id", ticket.SessionID)
+			}
+			if cookie := cookieHeader(ticket.Cookies); cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+		}
 		// Completion inspection observes the bytes actually forwarded to the host.
 		// Negotiate an uncompressed response only when we inject a ticket; normal
 		// passthrough preserves the caller's compression preferences and raw bytes.
@@ -361,6 +371,9 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		return sendForwardError(stream, code, message, requestSent)
 	}
 	defer response.Body.Close()
+	if ticket != nil {
+		e.updateTicketSession(ticket, response)
+	}
 	if pipe != nil {
 		_ = pipe.Close()
 	}
@@ -491,6 +504,38 @@ func classifyForwardTransportFailure(err error) (code, message string, requestSe
 		return "upstream_transport_reset", "Upstream transport failed: connection reset", true
 	}
 	return "upstream_transport", "Upstream transport failed", true
+}
+
+func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) {
+	if receipt == nil || response == nil || receipt.TicketMode != ticketModeCookie {
+		return
+	}
+	responseState := strings.TrimSpace(response.Header.Get(StateHeader))
+	if responseState != "" && validState(responseState, 312) {
+		return
+	}
+	responseCookies := response.Cookies()
+	if responseState == "" && len(responseCookies) == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.generation != receipt.Generation {
+		return
+	}
+	t := e.tickets[receipt.Key]
+	if t == nil || t.Version != receipt.Version || t.ConfigFingerprint != receipt.ConfigFingerprint || t.TicketMode != ticketModeCookie {
+		return
+	}
+	if len(responseCookies) > 0 {
+		if t.Cookies == nil {
+			t.Cookies = map[string]string{}
+		}
+		mergeResponseCookies(t.Cookies, responseCookies)
+	}
+	if responseState != "" && len(responseState) == len(t.State) && (validState(responseState, 292) || validState(responseState, 332)) {
+		t.State = responseState
+	}
 }
 
 func readConfiguredBody(ctx context.Context, stream pluginv1.TransportPlugin_ForwardServer, hasBody bool) ([]byte, error) {

@@ -1,11 +1,15 @@
 # STATE Kit 独立插件
 
-Sub2API v0.2.7 的开源 OpenAI OAuth transport 插件，提供逐账号 Pro / Team STATE 配置、账号级出口选择、固定业务代理复验、续期和响应异常守护。
+Sub2API v0.2.7 的开源 OpenAI OAuth transport 插件，提供逐账号 Pro / Team STATE 配置、旧模式同出口绑定、Cookie 分流、固定业务代理复验、备用票队列、续期和响应异常守护。
 
 请先阅读 [安装与使用说明](../docs/plugin.md)。配置在「插件管理 → STATE Kit → 配置」，不用修改宿主源码。首次安装需在宿主信任本插件的发布者公钥。
 
 - 插件 ID：`io.github.wangyunjeff.sub2api-state-kit`
-- 插件版本：`4.1.0`
+- 插件版本：`4.2.0`
+- 票据模式：旧模式保持打票、复验、业务出口一致；Cookie 分流模式允许采集和业务出口分离
+- Cookie 打票：支持代理生成器 API 或 `http`、`https`、`socks5`、`socks5h` 固定采集代理
+- 会话完整性：Cookie 模式必须同时具有 STATE、`session_id` 和至少一个响应 Cookie
+- 持续期与备用票：Cookie 票据默认 `300` 秒，可开启备用票并设置提前量，新票复验成功前不替换当前票
 - 账号显示：账号选择框显示 ID、名称、邮箱；账号资料保存名称、邮箱、到期时间和额度
 - 账号出口：可选 Sub2 原有代理、固定 provider session 粘性代理，或由插件调用代理生成器 API 取得固定出口
 - 生成器过滤：默认阻止香港 `HK`，未知出口地区同样拒绝；票据和生成器出口均支持最高 `180` 分钟，实际 TTL 取两者较小值

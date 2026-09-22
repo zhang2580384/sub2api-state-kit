@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,8 +87,33 @@ func (e *Engine) schedule() {
 				continue
 			}
 			t := e.tickets[k]
-			if validTicket(t, e.config, a, model, now) && t.ExpiresAt.Sub(now) > effectiveRefreshBefore(e.config, a) {
-				continue
+			if !validTicket(t, e.config, a, model, now) {
+				expectedFingerprint := proxyFingerprint(expectedBusinessProxyURL(e.config, a, ""))
+				if standby := e.standbyTickets[k]; validTicket(standby, e.config, a, model, now) &&
+					standbyMatches(standby, t, expectedFingerprint, "") {
+					e.tickets[k] = standby
+					delete(e.standbyTickets, k)
+					delete(e.revoked, k)
+					continue
+				} else if standby != nil {
+					delete(e.standbyTickets, k)
+				}
+			} else {
+				lead := effectiveRefreshBefore(e.config, a)
+				standbyEnabled := e.config.TicketMode == ticketModeCookie && e.config.StandbyTicketEnabled
+				if standbyEnabled {
+					lead = time.Duration(e.config.StandbyLeadSeconds) * time.Second
+					if validTicket(e.standbyTickets[k], e.config, a, model, now) {
+						continue
+					}
+				}
+				if t.ExpiresAt.Sub(now) > lead {
+					continue
+				}
+			}
+			standby := e.config.TicketMode == ticketModeCookie && e.config.StandbyTicketEnabled && validTicket(t, e.config, a, model, now)
+			if !validTicket(t, e.config, a, model, now) {
+				standby = false
 			}
 			c := e.config
 			gen := e.generation
@@ -95,7 +121,7 @@ func (e *Engine) schedule() {
 			host := e.host
 			e.jobs[k] = gen
 			e.wg.Add(1)
-			go e.collect(ctx, host, c, a, model, k, gen)
+			go e.collect(ctx, host, c, a, model, k, gen, standby)
 		}
 	}
 }
@@ -117,7 +143,7 @@ func (e *Engine) note(k string, gen uint64, attempt int, reason string) {
 	r.Attempts = attempt
 	r.LastError = reason
 }
-func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64) {
+func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, standby bool) {
 	defer e.wg.Done()
 	success := false
 	reason := "attempts_exhausted"
@@ -155,14 +181,19 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 	fp := configFingerprint(c, a, model)
 	// Restored tickets are revalidated through the current business proxy before
 	// reuse. This also prevents a failed persistence deletion reviving a bad ticket.
-	if restored, status := e.restore(ctx, host, c, a, model, k, gen, identity, fp); restored {
+	if restored, status := e.restore(ctx, host, c, a, model, k, gen, identity, fp, standby); restored {
 		success = true
 		return
 	} else if isStopStatus(status) {
 		reason = stopReason(status)
 		return
 	}
-	preferPrevious := c.PreferPreviousIP && a.EgressMode == egressModeGenerator
+	cookieMode := c.TicketMode == ticketModeCookie
+	generatorCapture := a.EgressMode == egressModeGenerator
+	if cookieMode {
+		generatorCapture = c.CookieCaptureMode == captureModeGenerator
+	}
+	preferPrevious := c.PreferPreviousIP && generatorCapture
 	attemptLimit := c.MaxAttempts
 	if preferPrevious {
 		// Reusing the previous egress is an optimization attempt. It must not
@@ -189,34 +220,54 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		targetProxyURL := ""
 		upstreamProxyURL := c.UpstreamProxyURL
-		switch a.EgressMode {
-		case egressModePlugin:
-			targetProxyURL = a.StickyProxyURL
-		case egressModeGenerator:
-			if reusePrevious {
-				reusePrevious = false
-				targetProxyURL = e.preferredPreviousProxy(ctx, host, a.AccountID, k)
-			}
-			if targetProxyURL == "" {
-				targetProxyURL, err = e.generateProxy(ctx, c)
-				if err != nil {
-					reason = "generator_unavailable"
-					e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-						UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
-					continue
+		if cookieMode {
+			if c.CookieCaptureMode == captureModeSOCKS5 {
+				targetProxyURL = c.CookieCaptureProxyURL
+			} else {
+				if reusePrevious {
+					reusePrevious = false
+					targetProxyURL = e.preferredPreviousProxy(ctx, host, a.AccountID, k)
+				}
+				if targetProxyURL == "" {
+					targetProxyURL, err = e.generateProxy(ctx, c)
+					if err != nil {
+						reason = "generator_unavailable"
+						e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
+							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
+						continue
+					}
 				}
 			}
-		default:
-			targetProxyURL, err = rotateProxy(c.DynamicProxyURL)
-			if err != nil {
-				reason = "invalid_dynamic_proxy"
-				return
+		} else {
+			switch a.EgressMode {
+			case egressModePlugin:
+				targetProxyURL = a.StickyProxyURL
+			case egressModeGenerator:
+				if reusePrevious {
+					reusePrevious = false
+					targetProxyURL = e.preferredPreviousProxy(ctx, host, a.AccountID, k)
+				}
+				if targetProxyURL == "" {
+					targetProxyURL, err = e.generateProxy(ctx, c)
+					if err != nil {
+						reason = "generator_unavailable"
+						e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
+							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason})
+						continue
+					}
+				}
+			default:
+				targetProxyURL, err = rotateProxy(c.DynamicProxyURL)
+				if err != nil {
+					reason = "invalid_dynamic_proxy"
+					return
+				}
 			}
 		}
-		generatorMode := a.EgressMode == egressModeGenerator
+		generatorMode := generatorCapture
 		captureEgress := ""
 		captureCountry := ""
-		if generatorMode {
+		if cookieMode || generatorMode {
 			captureEgress = e.lookupEgressIPRequired(ctx, targetProxyURL, upstreamProxyURL)
 			if captureEgress == "" {
 				reason = "generator_egress_unavailable"
@@ -234,8 +285,12 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		captured := time.Now()
 		captureStarted := time.Now()
-		candidate, status, captureModel, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "")
-		if !generatorMode {
+		sessionID := randomID()
+		cookies := map[string]string{}
+		captureResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "", sessionID, cookies)
+		candidate, status, captureModel := captureResult.State, captureResult.Status, captureResult.Model
+		cookies = captureResult.Cookies
+		if !generatorMode && !cookieMode {
 			captureEgress = e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
 		}
 		captureEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
@@ -275,7 +330,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		fixedProxyURL := targetProxyURL
 		fixedUpstreamProxyURL := upstreamProxyURL
-		if a.EgressMode == egressModeSub2 {
+		if cookieMode || a.EgressMode == egressModeSub2 {
 			fixedProxyURL, fixedUpstreamProxyURL, err = accountEgress(c, a, fixed.ProxyUrl, nil)
 			if err != nil {
 				reason = "account_egress_invalid"
@@ -284,26 +339,38 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		validationStarted := time.Now()
 		fixedEgress := e.lookupEgressIP(ctx, fixedProxyURL, fixedUpstreamProxyURL)
-		if generatorMode {
+		if cookieMode || generatorMode {
 			fixedEgress = e.lookupEgressIPRequired(ctx, fixedProxyURL, fixedUpstreamProxyURL)
 		}
 		validationEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "fixed_validation", Attempt: attempt,
 			UpstreamProxy: fixedUpstreamProxyURL, TargetProxy: fixedProxyURL, CaptureEgress: captureEgress, FixedEgress: fixedEgress,
 			EgressMatch: egressMatch(captureEgress, fixedEgress)}
-		if generatorMode && fixedEgress == "" {
-			reason = "generator_egress_unavailable"
+		if (cookieMode || generatorMode) && fixedEgress == "" {
+			reason = "business_egress_unavailable"
 			validationEvent.Outcome = "egress_unavailable"
 			validationEvent.Error = reason
 			e.recordDiagnostic(validationEvent)
 			continue
 		}
-		if (a.EgressMode == egressModePlugin || generatorMode) && captureEgress != "" && fixedEgress != "" && captureEgress != fixedEgress {
+		if cookieMode {
+			fixedCountry := e.lookupEgressCountry(ctx, fixedProxyURL, fixedUpstreamProxyURL, fixedEgress)
+			if countryBlocked(fixedCountry, c.ProxyGeneratorBlockedCountries) {
+				reason = "business_region_blocked"
+				validationEvent.Outcome = "region_blocked"
+				validationEvent.Error = reason
+				e.recordDiagnostic(validationEvent)
+				continue
+			}
+		}
+		if !cookieMode && (a.EgressMode == egressModePlugin || generatorMode) && captureEgress != "" && fixedEgress != "" && captureEgress != fixedEgress {
 			reason = "sticky_egress_changed"
 			validationEvent.Outcome = "egress_changed"
 			e.recordDiagnostic(validationEvent)
 			continue
 		}
-		returned, status, validationModel, err := e.probe(ctx, fixed, model, fixedProxyURL, fixedUpstreamProxyURL, candidate)
+		validationResult, err := e.probe(ctx, fixed, model, fixedProxyURL, fixedUpstreamProxyURL, candidate, sessionID, cookies)
+		returned, status, validationModel := validationResult.State, validationResult.Status, validationResult.Model
+		cookies = validationResult.Cookies
 		validationEvent.StateLength = len(returned)
 		validationEvent.StateClass = stateDiagnosticClass(returned)
 		validationEvent.ResponseModel = validationModel
@@ -325,19 +392,28 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			}
 			continue
 		}
+		if cookieMode && (sessionID == "" || len(cookies) == 0) {
+			reason = "cookie_session_incomplete"
+			validationEvent.Outcome = "session_incomplete"
+			validationEvent.Error = reason
+			e.recordDiagnostic(validationEvent)
+			continue
+		}
 		validationEvent.Outcome = "accepted"
 		e.recordDiagnostic(validationEvent)
 		generatedProxyURL := ""
-		if generatorMode {
+		if generatorMode && !cookieMode {
 			generatedProxyURL = fixedProxyURL
 		}
 		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: candidate, Version: randomID(),
 			ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), GeneratedProxyURL: generatedProxyURL,
 			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured,
-			ExpiresAt: captured.Add(time.Duration(effectiveTTLMinutes(c, a)) * time.Minute)}
-		if e.commit(ctx, host, c, a, model, k, gen, t, true) {
-			if generatorMode {
-				e.rememberPreviousEgress(ctx, host, a.AccountID, fixedProxyURL, captureEgress)
+			ExpiresAt: captured.Add(effectiveTicketTTL(c, a)), TicketMode: c.TicketMode,
+			CaptureProxyURL: targetProxyURL, CaptureEgressIP: captureEgress, BusinessEgressIP: fixedEgress,
+			Cookies: cookies, SessionID: sessionID}
+		if e.commit(ctx, host, c, a, model, k, gen, t, true, standby) {
+			if generatorCapture {
+				e.rememberPreviousEgress(ctx, host, a.AccountID, targetProxyURL, captureEgress)
 			}
 			success = true
 			return
@@ -383,7 +459,7 @@ func stableHeaders(id int64, headers map[string]*pluginv1.HeaderValues) string {
 	return digest(fmt.Sprint(id), account)
 }
 
-func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, identity *pluginv1.ResolveOutboundIdentityResponse, fp string) (bool, int) {
+func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, identity *pluginv1.ResolveOutboundIdentityResponse, fp string, standby bool) (bool, int) {
 	e.mu.Lock()
 	current := e.tickets[k]
 	revoked := e.revoked[k]
@@ -391,14 +467,29 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	if validTicket(current, c, a, model, time.Now()) {
 		return false, 0
 	} // Renewal keeps the old usable ticket throughout.
-	cc, cancel := context.WithTimeout(ctx, 3*time.Second)
-	r, err := host.KVGet(cc, &pluginv1.KVGetRequest{Namespace: namespace, Key: kvKey(a.AccountID, model, fp)})
-	cancel()
-	if err != nil || r == nil || !r.Found || len(r.Value) > 16*1024 {
-		return false, 0
+	key := kvKey(a.AccountID, model, fp)
+	alternateKey := standbyKVKey(a.AccountID, model, fp)
+	if standby {
+		key, alternateKey = alternateKey, key
 	}
-	var t ticket
-	if json.Unmarshal(r.Value, &t) != nil {
+	readTicket := func(valueKey string) (ticket, bool) {
+		cc, cancel := context.WithTimeout(ctx, 3*time.Second)
+		r, err := host.KVGet(cc, &pluginv1.KVGetRequest{Namespace: namespace, Key: valueKey})
+		cancel()
+		if err != nil || r == nil || !r.Found || len(r.Value) > 16*1024 {
+			return ticket{}, false
+		}
+		var t ticket
+		if json.Unmarshal(r.Value, &t) != nil {
+			return ticket{}, false
+		}
+		return t, true
+	}
+	t, ok := readTicket(key)
+	if !ok {
+		t, ok = readTicket(alternateKey)
+	}
+	if !ok {
 		return false, 0
 	}
 	targetProxyURL, upstreamProxyURL, err := accountEgress(c, a, identity.ProxyUrl, &t)
@@ -411,23 +502,37 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	}
 	restoreStarted := time.Now()
 	fixedEgress := e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
-	if a.EgressMode == egressModeGenerator {
+	if c.TicketMode == ticketModeCookie || a.EgressMode == egressModeGenerator {
 		fixedEgress = e.lookupEgressIPRequired(ctx, targetProxyURL, upstreamProxyURL)
 	}
 	event := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "restore",
 		UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL,
 		FixedEgress: fixedEgress}
-	if a.EgressMode == egressModeGenerator && (fixedEgress == "" || (t.GeneratedEgressIP != "" && fixedEgress != t.GeneratedEgressIP)) {
-		event.Outcome = "egress_changed"
-		event.Error = "generator_egress_unavailable"
-		if fixedEgress != "" {
-			event.Error = "sticky_egress_changed"
-		}
+	if (c.TicketMode == ticketModeCookie || a.EgressMode == egressModeGenerator) && fixedEgress == "" {
+		event.Outcome = "egress_unavailable"
+		event.Error = "business_egress_unavailable"
 		event.DurationMS = time.Since(restoreStarted).Milliseconds()
 		e.recordDiagnostic(event)
 		return false, 0
 	}
-	returned, status, responseModel, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, t.State)
+	if c.TicketMode == ticketModeCookie {
+		fixedCountry := e.lookupEgressCountry(ctx, targetProxyURL, upstreamProxyURL, fixedEgress)
+		if countryBlocked(fixedCountry, c.ProxyGeneratorBlockedCountries) {
+			event.Outcome = "region_blocked"
+			event.Error = "business_region_blocked"
+			event.DurationMS = time.Since(restoreStarted).Milliseconds()
+			e.recordDiagnostic(event)
+			return false, 0
+		}
+	} else if a.EgressMode == egressModeGenerator && t.GeneratedEgressIP != "" && fixedEgress != t.GeneratedEgressIP {
+		event.Outcome = "egress_changed"
+		event.Error = "sticky_egress_changed"
+		event.DurationMS = time.Since(restoreStarted).Milliseconds()
+		e.recordDiagnostic(event)
+		return false, 0
+	}
+	probeResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, t.State, t.SessionID, t.Cookies)
+	returned, status, responseModel := probeResult.State, probeResult.Status, probeResult.Model
 	event.StateLength = len(returned)
 	event.StateClass = stateDiagnosticClass(returned)
 	event.ResponseModel = responseModel
@@ -444,17 +549,22 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 		e.recordDiagnostic(event)
 		return false, status
 	}
+	if returned != "" {
+		t.State = returned
+	}
+	t.Cookies = probeResult.Cookies
+	t.BusinessEgressIP = fixedEgress
 	event.Outcome = "accepted"
 	e.recordDiagnostic(event)
-	if !e.commit(ctx, host, c, a, model, k, gen, &t, false) {
+	if !e.commit(ctx, host, c, a, model, k, gen, &t, false, standby) {
 		return false, status
 	}
-	if a.EgressMode == egressModeGenerator {
+	if c.TicketMode == ticketModeLegacy && a.EgressMode == egressModeGenerator {
 		e.rememberPreviousEgress(ctx, host, a.AccountID, t.GeneratedProxyURL, t.GeneratedEgressIP)
 	}
 	return true, status
 }
-func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, t *ticket, persist bool) bool {
+func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, t *ticket, persist bool, standby bool) bool {
 	e.persistMu.Lock()
 	defer e.persistMu.Unlock()
 	valid := func() bool {
@@ -462,13 +572,18 @@ func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c 
 	}
 	e.mu.Lock()
 	ok := valid()
+	targetStandby := standby && validTicket(e.tickets[k], c, a, model, time.Now())
 	e.mu.Unlock()
 	if !ok {
 		return false
 	}
 	if persist {
+		persistKey := kvKey(a.AccountID, model, t.ConfigFingerprint)
+		if targetStandby {
+			persistKey = standbyKVKey(a.AccountID, model, t.ConfigFingerprint)
+		}
 		cc, cancel := context.WithTimeout(ctx, 3*time.Second)
-		_, err := host.KVSet(cc, &pluginv1.KVSetRequest{Namespace: namespace, Key: kvKey(a.AccountID, model, t.ConfigFingerprint), Value: []byte(jsonText(t)), TtlSeconds: max(1, int64(time.Until(t.ExpiresAt).Seconds()))})
+		_, err := host.KVSet(cc, &pluginv1.KVSetRequest{Namespace: namespace, Key: persistKey, Value: []byte(jsonText(t)), TtlSeconds: max(1, int64(time.Until(t.ExpiresAt).Seconds()))})
 		cancel()
 		if err != nil {
 			return false
@@ -479,19 +594,36 @@ func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c 
 	if !valid() {
 		return false
 	}
-	e.tickets[k] = t
+	if standby && validTicket(e.tickets[k], c, a, model, time.Now()) {
+		e.standbyTickets[k] = t
+	} else {
+		e.tickets[k] = t
+		delete(e.standbyTickets, k)
+	}
 	delete(e.revoked, k)
 	return true
 }
 
-func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundIdentityResponse, model, proxyURL, upstreamProxyURL, state string) (string, int, string, error) {
+type ticketProbeResult struct {
+	State     string
+	Status    int
+	Model     string
+	Cookies   map[string]string
+	SessionID string
+}
+
+func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundIdentityResponse, model, proxyURL, upstreamProxyURL, state, sessionID string, cookies map[string]string) (ticketProbeResult, error) {
+	result := ticketProbeResult{Cookies: cloneCookies(cookies), SessionID: sessionID}
+	if result.Cookies == nil {
+		result.Cookies = map[string]string{}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	payload := map[string]any{"model": model, "store": false, "stream": true, "instructions": "Reply with exactly: pong", "input": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}}}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.probeURL, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, "", errors.New("probe construction failed")
+		return result, errors.New("probe construction failed")
 	}
 	for name, values := range identity.Headers {
 		if values == nil {
@@ -507,27 +639,36 @@ func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundId
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
-	req.Header.Set("session_id", randomID())
+	if sessionID == "" {
+		sessionID = randomID()
+		result.SessionID = sessionID
+	}
+	req.Header.Set("session_id", sessionID)
 	req.Header.Set("version", "0.153.4")
 	req.Header.Set("User-Agent", "codex_cli_rs/0.153.4")
 	req.Header.Set("originator", "codex_cli_rs")
+	if cookie := cookieHeader(result.Cookies); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
 	if state != "" {
 		req.Header.Set(StateHeader, state)
 	}
 	req.Close = true
 	client, err := freshProbeClient(proxyURL, upstreamProxyURL)
 	if err != nil {
-		return "", 0, "", errors.New("probe transport unavailable")
+		return result, errors.New("probe transport unavailable")
 	}
 	defer client.CloseIdleConnections()
 	response, err := client.Do(req)
 	if err != nil {
-		return "", 0, "", errors.New("probe transport failed")
+		return result, errors.New("probe transport failed")
 	}
 	defer response.Body.Close()
 	status := response.StatusCode
+	result.Status = status
+	mergeResponseCookies(result.Cookies, response.Cookies())
 	if status != http.StatusOK {
-		return "", status, "", errors.New("probe request rejected")
+		return result, errors.New("probe request rejected")
 	}
 	observer := newCompletionObserver(model)
 	buf := make([]byte, 16*1024)
@@ -537,7 +678,8 @@ func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundId
 		if n > 0 {
 			total += n
 			if total > 4*1024*1024 {
-				return "", status, observer.ActualModel(), errors.New("probe response too large")
+				result.Model = observer.ActualModel()
+				return result, errors.New("probe response too large")
 			}
 			observer.Write(buf[:n])
 		}
@@ -545,15 +687,52 @@ func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundId
 			break
 		}
 		if readErr != nil {
-			return "", status, observer.ActualModel(), errors.New("probe response interrupted")
+			result.Model = observer.ActualModel()
+			return result, errors.New("probe response interrupted")
 		}
 	}
 	observer.Finish()
+	result.Model = observer.ActualModel()
 	complete, matches := observer.Result()
 	if !complete || !matches {
-		return "", status, observer.ActualModel(), errors.New("probe did not complete with requested model")
+		return result, errors.New("probe did not complete with requested model")
 	}
-	return strings.TrimSpace(response.Header.Get(StateHeader)), status, observer.ActualModel(), nil
+	result.State = strings.TrimSpace(response.Header.Get(StateHeader))
+	return result, nil
+}
+
+func cookieHeader(cookies map[string]string) string {
+	if len(cookies) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(cookies))
+	for name := range cookies {
+		if strings.TrimSpace(name) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+"="+cookies[name])
+	}
+	return strings.Join(parts, "; ")
+}
+
+func mergeResponseCookies(jar map[string]string, cookies []*http.Cookie) {
+	if jar == nil {
+		return
+	}
+	for _, cookie := range cookies {
+		if cookie == nil || strings.TrimSpace(cookie.Name) == "" {
+			continue
+		}
+		if cookie.MaxAge < 0 || (!cookie.Expires.IsZero() && cookie.Expires.Before(time.Now())) {
+			delete(jar, cookie.Name)
+			continue
+		}
+		jar[cookie.Name] = cookie.Value
+	}
 }
 
 var sidPattern = regexp.MustCompile(`(?i)(-sid-)[^-]+`)

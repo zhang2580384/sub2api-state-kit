@@ -16,6 +16,10 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7 }] }).accounts[0].egress_mode, 'sub2');
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7, name: ' Example ' }] }).accounts[0].name, 'Example');
   assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
+  assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
+  assert.equal(ui.normalizeConfig({}).cookie_capture_mode, 'generator');
+  assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 300);
+  assert.equal(ui.normalizeConfig({}).standby_lead_seconds, 90);
   assert.equal(ui.validateConfig(configured()).enabled, false);
 });
 
@@ -67,6 +71,28 @@ test('generator egress uses the plugin API and always blocks unknown or Hong Kon
   config.proxy_generator_blocked_countries = ['HK'];
   config.prefer_previous_ip = 'yes';
   assert.throws(() => ui.validateConfig(config), /复用开关/);
+});
+
+test('cookie mode validates capture and business egress independently', () => {
+  const config = configured({ enabled: true, ticket_mode: 'cookie', cookie_capture_mode: 'socks5' });
+  config.accounts[0].enabled = true;
+  assert.throws(() => ui.validateConfig(config), /请填写采集代理/);
+  config.cookie_capture_proxy_url = 'socks5h://capture-user:capture-pass@capture.example:1080';
+  config.cookie_business_proxy_url = 'http://business-user:business-pass@business.example:8080';
+  config.cookie_ticket_ttl_seconds = 300;
+  config.standby_ticket_enabled = true;
+  config.standby_lead_seconds = 90;
+  config.dynamic_proxy_url = '';
+  assert.equal(ui.validateConfig(config), config);
+  config.standby_lead_seconds = 300;
+  assert.throws(() => ui.validateConfig(config), /备用票提前量必须小于/);
+  config.standby_lead_seconds = 90;
+  config.cookie_capture_mode = 'generator';
+  config.proxy_generator_url = '';
+  assert.throws(() => ui.validateConfig(config), /请填写代理生成器地址/);
+  config.proxy_generator_url = 'https://generator.example/gen?zone=custom';
+  config.ticket_mode = 'other';
+  assert.throws(() => ui.validateConfig(config), /票据模式/);
 });
 
 test('account labels omit empty fields instead of showing placeholder text', () => {
@@ -305,6 +331,32 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   assert.equal(h.calls.save[0].prefer_previous_ip, true);
   assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
   assert.equal(h.calls.save[0].refresh_before_seconds, 30);
+  h.runtime.stop();
+});
+
+test('cookie split mode saves capture, business, TTL and standby controls', async () => {
+  const h = uiHarness(); await settle();
+  h.get('ticket-mode').value = 'cookie';
+  await h.get('ticket-mode').fire('change');
+  assert.equal(h.get('legacy-mode-fields').hidden, true);
+  assert.equal(h.get('cookie-mode-fields').hidden, false);
+  h.get('cookie-capture-mode').value = 'socks5';
+  await h.get('cookie-capture-mode').fire('change');
+  h.get('cookie-capture-proxy-url').value = 'socks5h://capture-user:capture-pass@capture.example:1080';
+  h.get('cookie-business-proxy-url').value = 'http://business-user:business-pass@business.example:8080';
+  h.get('cookie-ticket-ttl-seconds').value = '300';
+  h.get('standby-ticket-enabled').checked = true;
+  await h.get('standby-ticket-enabled').fire('change');
+  h.get('standby-lead-seconds').value = '90';
+  await h.get('save-config').click();
+  assert.equal(h.calls.save.length, 1);
+  assert.equal(h.calls.save[0].ticket_mode, 'cookie');
+  assert.equal(h.calls.save[0].cookie_capture_mode, 'socks5');
+  assert.equal(h.calls.save[0].cookie_capture_proxy_url, 'socks5h://capture-user:capture-pass@capture.example:1080');
+  assert.equal(h.calls.save[0].cookie_business_proxy_url, 'http://business-user:business-pass@business.example:8080');
+  assert.equal(h.calls.save[0].cookie_ticket_ttl_seconds, 300);
+  assert.equal(h.calls.save[0].standby_ticket_enabled, true);
+  assert.equal(h.calls.save[0].standby_lead_seconds, 90);
   h.runtime.stop();
 });
 

@@ -37,6 +37,7 @@ type Engine struct {
 	directoryAt      time.Time
 	directoryError   string
 	tickets          map[string]*ticket
+	standbyTickets   map[string]*ticket
 	previous         map[int64]previousEgress
 	records          map[string]*jobRecord
 	jobs             map[string]uint64
@@ -61,18 +62,24 @@ type jobRecord struct {
 	CooldownUntil time.Time
 }
 type ticket struct {
-	AccountID           int64     `json:"account_id"`
-	Model               string    `json:"model"`
-	Plan                string    `json:"plan"`
-	State               string    `json:"state"`
-	Version             string    `json:"version"`
-	ConfigFingerprint   string    `json:"config_fingerprint"`
-	FixedFingerprint    string    `json:"fixed_fingerprint"`
-	GeneratedProxyURL   string    `json:"generated_proxy_url,omitempty"`
-	GeneratedEgressIP   string    `json:"generated_egress_ip,omitempty"`
-	IdentityFingerprint string    `json:"identity_fingerprint"`
-	CapturedAt          time.Time `json:"captured_at"`
-	ExpiresAt           time.Time `json:"expires_at"`
+	AccountID           int64             `json:"account_id"`
+	Model               string            `json:"model"`
+	Plan                string            `json:"plan"`
+	State               string            `json:"state"`
+	Version             string            `json:"version"`
+	ConfigFingerprint   string            `json:"config_fingerprint"`
+	FixedFingerprint    string            `json:"fixed_fingerprint"`
+	GeneratedProxyURL   string            `json:"generated_proxy_url,omitempty"`
+	GeneratedEgressIP   string            `json:"generated_egress_ip,omitempty"`
+	IdentityFingerprint string            `json:"identity_fingerprint"`
+	CapturedAt          time.Time         `json:"captured_at"`
+	ExpiresAt           time.Time         `json:"expires_at"`
+	TicketMode          string            `json:"ticket_mode,omitempty"`
+	CaptureProxyURL     string            `json:"-"`
+	CaptureEgressIP     string            `json:"capture_egress_ip,omitempty"`
+	BusinessEgressIP    string            `json:"business_egress_ip,omitempty"`
+	Cookies             map[string]string `json:"cookies,omitempty"`
+	SessionID           string            `json:"session_id,omitempty"`
 }
 type previousEgress struct {
 	AccountID int64     `json:"account_id"`
@@ -83,18 +90,25 @@ type previousEgress struct {
 type receipt struct {
 	State, Version, Key, ConfigFingerprint string
 	TargetProxyURL, UpstreamProxyURL       string
+	TicketMode                             string
+	Cookies                                map[string]string
+	SessionID                              string
 	Generation                             uint64
 }
 type statusTicket struct {
-	AccountID        int64  `json:"account_id"`
-	Model            string `json:"model"`
-	Plan             string `json:"plan"`
-	State            string `json:"state"`
-	Status           string `json:"status"`
-	RemainingSeconds int64  `json:"remaining_seconds"`
-	ExpiresAt        string `json:"expires_at"`
-	LastError        string `json:"last_error"`
-	Attempts         int    `json:"attempts"`
+	AccountID               int64  `json:"account_id"`
+	Model                   string `json:"model"`
+	Plan                    string `json:"plan"`
+	TicketMode              string `json:"ticket_mode"`
+	State                   string `json:"state"`
+	Status                  string `json:"status"`
+	RemainingSeconds        int64  `json:"remaining_seconds"`
+	ExpiresAt               string `json:"expires_at"`
+	StandbyReady            bool   `json:"standby_ready"`
+	StandbyRemainingSeconds int64  `json:"standby_remaining_seconds"`
+	StandbyExpiresAt        string `json:"standby_expires_at,omitempty"`
+	LastError               string `json:"last_error"`
+	Attempts                int    `json:"attempts"`
 }
 type statusSnapshot struct {
 	HostReady            bool              `json:"host_ready"`
@@ -126,7 +140,7 @@ func newEngine(host pluginv1.HostServiceClient, probeURL string, tick time.Durat
 	e := &Engine{
 		config: DefaultConfig(), ctx: ctx, cancel: cancel, generationCtx: gc, generationCancel: gcancel,
 		wake: make(chan struct{}, 1), done: make(chan struct{}), host: host, hostReady: host != nil,
-		directory: map[int64]bool{}, tickets: map[string]*ticket{}, records: map[string]*jobRecord{},
+		directory: map[int64]bool{}, tickets: map[string]*ticket{}, standbyTickets: map[string]*ticket{}, records: map[string]*jobRecord{},
 		previous: map[int64]previousEgress{}, jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4),
 		clients: newClientPool(), probeURL: probeURL, egressURL: "https://api.ipify.org?format=json",
 		geoURLs: []string{
@@ -245,6 +259,12 @@ func (e *Engine) ApplyConfig(_ context.Context, r *pluginv1.ApplyConfigRequest) 
 			delete(e.tickets, k)
 		}
 	}
+	for k, t := range e.standbyTickets {
+		a, ok := findAccount(c, t.AccountID)
+		if !ok || !contains(a.Models, t.Model) || t.ConfigFingerprint != configFingerprint(c, a, t.Model) {
+			delete(e.standbyTickets, k)
+		}
+	}
 	for id := range e.previous {
 		if _, ok := findAccount(c, id); !ok {
 			delete(e.previous, id)
@@ -307,9 +327,21 @@ func keyFor(id int64, model string) string { return fmt.Sprintf("%d.%s", id, mod
 func kvKey(id int64, model, fp string) string {
 	return fmt.Sprintf("ticket.%d.%s", id, digest(model, fp))
 }
+func standbyKVKey(id int64, model, fp string) string {
+	return fmt.Sprintf("ticket.standby.%d.%s", id, digest(model, fp))
+}
 func previousEgressKey(id int64) string  { return fmt.Sprintf("egress.%d", id) }
 func proxyFingerprint(raw string) string { return digest("business-proxy-v1", strings.TrimSpace(raw)) }
 func accountEgress(c Config, a AccountConfig, hostProxyURL string, t *ticket) (string, string, error) {
+	if c.TicketMode == ticketModeCookie {
+		if c.CookieBusinessProxyURL == "" {
+			return "", c.UpstreamProxyURL, nil
+		}
+		if err := validateProxy(c.CookieBusinessProxyURL); err != nil {
+			return "", "", errors.New("cookie business proxy is invalid")
+		}
+		return c.CookieBusinessProxyURL, c.UpstreamProxyURL, nil
+	}
 	if a.EgressMode == egressModePlugin {
 		if a.StickyProxyURL == "" {
 			return "", "", errors.New("account sticky proxy is not configured")
@@ -326,6 +358,15 @@ func accountEgress(c Config, a AccountConfig, hostProxyURL string, t *ticket) (s
 		return "", "", errors.New("business proxy invalid")
 	}
 	return hostProxyURL, "", nil
+}
+func expectedBusinessProxyURL(c Config, a AccountConfig, hostProxyURL string) string {
+	if c.TicketMode == ticketModeCookie {
+		return c.CookieBusinessProxyURL
+	}
+	if a.EgressMode == egressModePlugin {
+		return a.StickyProxyURL
+	}
+	return hostProxyURL
 }
 func (e *Engine) accountEnabled(start *pluginv1.ForwardRequestStart) bool {
 	if start == nil || start.Platform != "openai" || start.AccountType != "oauth" {
@@ -355,16 +396,25 @@ func (e *Engine) ticketForRequest(_ context.Context, start *pluginv1.ForwardRequ
 	}
 	k := keyFor(start.AccountId, model)
 	t := e.tickets[k]
-	expectedProxyURL := start.ProxyUrl
-	if a.EgressMode == egressModePlugin {
-		expectedProxyURL = a.StickyProxyURL
-	} else if a.EgressMode == egressModeGenerator && t != nil {
+	expectedProxyURL := expectedBusinessProxyURL(e.config, a, start.ProxyUrl)
+	if e.config.TicketMode == ticketModeLegacy && a.EgressMode == egressModeGenerator && t != nil {
 		expectedProxyURL = t.GeneratedProxyURL
 	}
 	expectedFingerprint := proxyFingerprint(expectedProxyURL)
 	if t != nil && (t.FixedFingerprint != expectedFingerprint || t.IdentityFingerprint != stableHeaders(start.AccountId, start.Headers)) {
 		delete(e.tickets, k)
 		t = nil
+	}
+	if !validTicket(t, e.config, a, model, time.Now()) {
+		if standby := e.standbyTickets[k]; validTicket(standby, e.config, a, model, time.Now()) &&
+			standbyMatches(standby, t, expectedFingerprint, stableHeaders(start.AccountId, start.Headers)) {
+			t = standby
+			e.tickets[k] = standby
+			delete(e.standbyTickets, k)
+			delete(e.revoked, k)
+		} else if standby != nil {
+			delete(e.standbyTickets, k)
+		}
 	}
 
 	if !e.closed && e.hostReady && e.directory[start.AccountId] && validTicket(t, e.config, a, model, time.Now()) && t.FixedFingerprint == expectedFingerprint && t.IdentityFingerprint == stableHeaders(start.AccountId, start.Headers) && e.revoked[k] != t.Version {
@@ -374,7 +424,8 @@ func (e *Engine) ticketForRequest(_ context.Context, start *pluginv1.ForwardRequ
 		}
 		return &receipt{
 			State: t.State, Version: t.Version, Key: k, ConfigFingerprint: t.ConfigFingerprint,
-			TargetProxyURL: targetProxyURL, UpstreamProxyURL: upstreamProxyURL, Generation: e.generation,
+			TargetProxyURL: targetProxyURL, UpstreamProxyURL: upstreamProxyURL, TicketMode: t.TicketMode,
+			Cookies: cloneCookies(t.Cookies), SessionID: t.SessionID, Generation: e.generation,
 		}, nil
 	}
 	e.notify()
@@ -388,15 +439,32 @@ func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Ti
 		!t.ExpiresAt.After(t.CapturedAt) || !now.Before(t.ExpiresAt) {
 		return false
 	}
-	if a.EgressMode == egressModeGenerator {
-		if t.GeneratedProxyURL == "" || validateProxy(t.GeneratedProxyURL) != nil {
+	if c.TicketMode == ticketModeCookie {
+		if t.TicketMode != ticketModeCookie || t.SessionID == "" || len(t.Cookies) == 0 {
 			return false
 		}
-	} else if t.GeneratedProxyURL != "" {
+	} else {
+		if a.EgressMode == egressModeGenerator {
+			if t.GeneratedProxyURL == "" || validateProxy(t.GeneratedProxyURL) != nil {
+				return false
+			}
+		} else if t.GeneratedProxyURL != "" {
+			return false
+		}
+	}
+	return t.ExpiresAt.Sub(t.CapturedAt) <= effectiveTicketTTL(c, a)
+}
+
+func standbyMatches(standby, identitySource *ticket, expectedFingerprint, expectedIdentity string) bool {
+	if standby == nil || standby.FixedFingerprint != expectedFingerprint {
 		return false
 	}
-	return t.ExpiresAt.Sub(t.CapturedAt) <= time.Duration(effectiveTTLMinutes(c, a))*time.Minute
+	if expectedIdentity == "" && identitySource != nil {
+		expectedIdentity = identitySource.IdentityFingerprint
+	}
+	return expectedIdentity != "" && standby.IdentityFingerprint == expectedIdentity
 }
+
 func (e *Engine) invalidate(r *receipt, reason string) {
 	if r == nil || (reason != "model_mismatch" && reason != "state_312") {
 		return
@@ -476,14 +544,20 @@ func (e *Engine) snapshotLocked(now time.Time) statusSnapshot {
 		for _, model := range a.Models {
 			k := keyFor(a.AccountID, model)
 			t := e.tickets[k]
+			standby := e.standbyTickets[k]
 			r := e.records[k]
-			row := statusTicket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: "queued"}
+			row := statusTicket{AccountID: a.AccountID, Model: model, Plan: a.Plan, TicketMode: e.config.TicketMode, State: "queued"}
 			valid := validTicket(t, e.config, a, model, now)
 			if t != nil {
 				row.ExpiresAt = t.ExpiresAt.UTC().Format(time.RFC3339)
 				if valid {
 					row.RemainingSeconds = int64(t.ExpiresAt.Sub(now).Seconds())
 				}
+			}
+			if validTicket(standby, e.config, a, model, now) {
+				row.StandbyReady = true
+				row.StandbyRemainingSeconds = int64(standby.ExpiresAt.Sub(now).Seconds())
+				row.StandbyExpiresAt = standby.ExpiresAt.UTC().Format(time.RFC3339)
 			}
 			if r != nil {
 				row.Attempts = r.Attempts

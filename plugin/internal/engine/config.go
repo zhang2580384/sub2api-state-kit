@@ -16,7 +16,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.1.0"
+const Version = "4.2.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -24,6 +24,16 @@ const (
 	egressModeSub2      = "sub2"
 	egressModePlugin    = "plugin"
 	egressModeGenerator = "generator"
+)
+
+const (
+	ticketModeLegacy = "legacy"
+	ticketModeCookie = "cookie"
+)
+
+const (
+	captureModeGenerator = "generator"
+	captureModeSOCKS5    = "socks5"
 )
 
 // Config contains no OAuth credentials. The host owns credential refresh.
@@ -36,6 +46,13 @@ type Config struct {
 	ProxyGeneratorBlockedCountries []string `json:"proxy_generator_blocked_countries"`
 	ProxyGeneratorTTLMinutes       int      `json:"proxy_generator_ttl_minutes"`
 	PreferPreviousIP               bool     `json:"prefer_previous_ip"`
+	TicketMode                     string   `json:"ticket_mode"`
+	CookieCaptureMode              string   `json:"cookie_capture_mode"`
+	CookieCaptureProxyURL          string   `json:"cookie_capture_proxy_url"`
+	CookieBusinessProxyURL         string   `json:"cookie_business_proxy_url"`
+	CookieTicketTTLSeconds         int      `json:"cookie_ticket_ttl_seconds"`
+	StandbyTicketEnabled           bool     `json:"standby_ticket_enabled"`
+	StandbyLeadSeconds             int      `json:"standby_lead_seconds"`
 	// DiagnosticLogEnabled is retained only so configurations saved by v0.3.6
 	// remain loadable. Diagnostics are now a UI-scoped live listener and the
 	// value is intentionally ignored.
@@ -70,6 +87,10 @@ func DefaultConfig() Config {
 		CooldownSeconds:                300,
 		ProxyGeneratorBlockedCountries: []string{"HK"},
 		ProxyGeneratorTTLMinutes:       180,
+		TicketMode:                     ticketModeLegacy,
+		CookieCaptureMode:              captureModeGenerator,
+		CookieTicketTTLSeconds:         300,
+		StandbyLeadSeconds:             90,
 		Accounts:                       []AccountConfig{},
 	}
 }
@@ -110,8 +131,24 @@ func ParseConfig(raw []byte) (Config, error) {
 	c.UpstreamProxyURL = strings.TrimSpace(c.UpstreamProxyURL)
 	c.DynamicProxyURL = strings.TrimSpace(c.DynamicProxyURL)
 	c.ProxyGeneratorURL = strings.TrimSpace(c.ProxyGeneratorURL)
+	c.TicketMode = strings.ToLower(strings.TrimSpace(c.TicketMode))
+	if c.TicketMode == "" {
+		c.TicketMode = ticketModeLegacy
+	}
+	c.CookieCaptureMode = strings.ToLower(strings.TrimSpace(c.CookieCaptureMode))
+	if c.CookieCaptureMode == "" {
+		c.CookieCaptureMode = captureModeGenerator
+	}
+	c.CookieCaptureProxyURL = strings.TrimSpace(c.CookieCaptureProxyURL)
+	c.CookieBusinessProxyURL = strings.TrimSpace(c.CookieBusinessProxyURL)
 	if c.UpstreamProxyID < 0 {
 		return c, errors.New("upstream_proxy_id must be nonnegative")
+	}
+	if c.TicketMode != ticketModeLegacy && c.TicketMode != ticketModeCookie {
+		return c, errors.New("ticket_mode must be legacy or cookie")
+	}
+	if c.CookieCaptureMode != captureModeGenerator && c.CookieCaptureMode != captureModeSOCKS5 {
+		return c, errors.New("cookie_capture_mode must be generator or socks5")
 	}
 	if c.TTLMinutes < 1 || c.TTLMinutes > 180 {
 		return c, errors.New("ttl_minutes must be 1..180")
@@ -131,10 +168,25 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.ProxyGeneratorTTLMinutes < 1 || c.ProxyGeneratorTTLMinutes > 180 {
 		return c, errors.New("proxy_generator_ttl_minutes must be 1..180")
 	}
+	if c.CookieTicketTTLSeconds < 30 || c.CookieTicketTTLSeconds > 1800 {
+		return c, errors.New("cookie_ticket_ttl_seconds must be 30..1800")
+	}
+	if c.StandbyLeadSeconds < 10 || c.StandbyLeadSeconds > 600 {
+		return c, errors.New("standby_lead_seconds must be 10..600")
+	}
+	if c.StandbyLeadSeconds >= c.CookieTicketTTLSeconds {
+		return c, errors.New("standby_lead_seconds must be less than cookie_ticket_ttl_seconds")
+	}
 	if err := validateProxy(c.UpstreamProxyURL); err != nil {
 		return c, err
 	}
 	if err := validateProxy(c.DynamicProxyURL); err != nil {
+		return c, err
+	}
+	if err := validateProxy(c.CookieCaptureProxyURL); err != nil {
+		return c, err
+	}
+	if err := validateProxy(c.CookieBusinessProxyURL); err != nil {
 		return c, err
 	}
 	if err := validateProxyGeneratorURL(c.ProxyGeneratorURL); err != nil {
@@ -158,6 +210,8 @@ func ParseConfig(raw []byte) (Config, error) {
 	anyEnabled := false
 	needsDynamicProxy := false
 	needsGenerator := false
+	needsCookieCaptureProxy := false
+	needsCookieGenerator := false
 	total := 0
 	for i := range c.Accounts {
 		a := &c.Accounts[i]
@@ -208,8 +262,15 @@ func ParseConfig(raw []byte) (Config, error) {
 		}
 		total += len(a.Models)
 		anyEnabled = anyEnabled || a.Enabled
-		needsDynamicProxy = needsDynamicProxy || a.Enabled && a.EgressMode == egressModeSub2
-		needsGenerator = needsGenerator || a.Enabled && a.EgressMode == egressModeGenerator
+		needsDynamicProxy = needsDynamicProxy || c.TicketMode == ticketModeLegacy && a.Enabled && a.EgressMode == egressModeSub2
+		needsGenerator = needsGenerator || c.TicketMode == ticketModeLegacy && a.Enabled && a.EgressMode == egressModeGenerator
+		if a.Enabled && c.TicketMode == ticketModeCookie {
+			if c.CookieCaptureMode == captureModeSOCKS5 {
+				needsCookieCaptureProxy = true
+			} else {
+				needsCookieGenerator = true
+			}
+		}
 	}
 	if total > 1024 {
 		return c, errors.New("at most 1024 account/model pairs are supported")
@@ -219,6 +280,12 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	if c.Enabled && anyEnabled && needsGenerator && c.ProxyGeneratorURL == "" {
 		return c, errors.New("proxy_generator_url is required for enabled accounts using generator egress")
+	}
+	if c.Enabled && anyEnabled && needsCookieCaptureProxy && c.CookieCaptureProxyURL == "" {
+		return c, errors.New("cookie_capture_proxy_url is required for cookie ticket mode using socks5 capture")
+	}
+	if c.Enabled && anyEnabled && needsCookieGenerator && c.ProxyGeneratorURL == "" {
+		return c, errors.New("proxy_generator_url is required for cookie ticket mode using generator capture")
 	}
 	return c, nil
 }
@@ -337,8 +404,10 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v4", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+	return digest("v5", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
 		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
+		c.TicketMode, c.CookieCaptureMode, c.CookieCaptureProxyURL, c.CookieBusinessProxyURL,
+		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),
 		a.Plan, model, jsonText(struct {
 			ID             int64
 			TTL            int
@@ -346,14 +415,27 @@ func configFingerprint(c Config, a AccountConfig, model string) string {
 			StickyProxyURL string
 		}{a.AccountID, c.TTLMinutes, a.EgressMode, a.StickyProxyURL}))
 }
+func effectiveTicketTTL(c Config, a AccountConfig) time.Duration {
+	if c.TicketMode == ticketModeCookie {
+		return time.Duration(c.CookieTicketTTLSeconds) * time.Second
+	}
+	minutes := c.TTLMinutes
+	if a.EgressMode == egressModeGenerator && c.ProxyGeneratorTTLMinutes < minutes {
+		minutes = c.ProxyGeneratorTTLMinutes
+	}
+	return time.Duration(minutes) * time.Minute
+}
 func effectiveTTLMinutes(c Config, a AccountConfig) int {
+	if c.TicketMode == ticketModeCookie {
+		return max(1, (c.CookieTicketTTLSeconds+59)/60)
+	}
 	if a.EgressMode == egressModeGenerator && c.ProxyGeneratorTTLMinutes < c.TTLMinutes {
 		return c.ProxyGeneratorTTLMinutes
 	}
 	return c.TTLMinutes
 }
 func effectiveRefreshBefore(c Config, a AccountConfig) time.Duration {
-	ttl := time.Duration(effectiveTTLMinutes(c, a)) * time.Minute
+	ttl := effectiveTicketTTL(c, a)
 	refresh := time.Duration(c.RefreshBeforeSeconds) * time.Second
 	if refresh < ttl {
 		return refresh
@@ -364,6 +446,16 @@ func effectiveRefreshBefore(c Config, a AccountConfig) time.Duration {
 	return ttl - time.Second
 }
 func jsonText(v any) string { b, _ := json.Marshal(v); return string(b) }
+func cloneCookies(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(source))
+	for name, value := range source {
+		result[name] = value
+	}
+	return result
+}
 func targetLength(plan string) int {
 	if plan == "team" {
 		return 332
