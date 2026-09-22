@@ -15,7 +15,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugin"
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 PLUGIN_ID = "io.github.wangyunjeff.sub2api-state-kit"
 KEY_ID = "state-kit-local-v1"
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-arm64")
@@ -81,7 +81,7 @@ def source_archive(destination: Path):
             continue
         if path.name.startswith(".") or path.name.endswith(".log"):
             continue
-        files[str(rel)] = path.read_bytes()
+        files[rel.as_posix()] = path.read_bytes()
     for relative in ("LICENSE", "NOTICE", "scripts/package_plugin.py", "docs/plugin.md", "docs/plugin-validation.md"):
         path = ROOT / relative
         if path.exists():
@@ -100,7 +100,8 @@ def build(args):
     key = args.private_key.expanduser().resolve()
     if key.is_relative_to(ROOT):
         raise ValueError("Keep the release signing private key OUTSIDE the source repository")
-    if key.stat().st_mode & 0o077:
+    # NTFS cannot represent Unix owner-only bits through pathlib's st_mode.
+    if os.name != "nt" and key.stat().st_mode & 0o077:
         raise ValueError("Signing private key must be readable only by its owner (chmod 600)")
     expected = base64.b64decode((PLUGIN / "release/publisher-public-key.txt").read_text().strip(), validate=True)
     if public_der(args.openssl, key)[12:] != expected:
@@ -134,7 +135,7 @@ def build(args):
             if path.is_file():
                 if path.is_symlink() or path.suffix not in {".html", ".js", ".css"}:
                     raise ValueError("Unexpected UI payload: " + str(path))
-                files[str(path.relative_to(PLUGIN))] = path.read_bytes()
+                files[path.relative_to(PLUGIN).as_posix()] = path.read_bytes()
         manifest = {
             "schema_version": 1, "id": PLUGIN_ID, "name": "STATE Kit · 账号级票据",
             "version": VERSION, "description": "按账号启用的 Pro / Team STATE 管理，可选择 Sub2 原有代理、账号粘性代理或内置代理生成器，支持地区过滤、上一轮可用出口复用、固定出口复验、实时诊断监听、续期与异常守护。",

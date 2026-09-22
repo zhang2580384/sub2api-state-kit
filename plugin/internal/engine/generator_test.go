@@ -40,7 +40,7 @@ func TestParseGeneratedProxy(t *testing.T) {
 
 func TestGeneratorConfigAndCountryFilter(t *testing.T) {
 	cfg := DefaultConfig()
-	if len(cfg.ProxyGeneratorBlockedCountries) != 1 || cfg.ProxyGeneratorBlockedCountries[0] != "HK" || cfg.ProxyGeneratorTTLMinutes != 5 {
+	if len(cfg.ProxyGeneratorBlockedCountries) != 1 || cfg.ProxyGeneratorBlockedCountries[0] != "HK" || cfg.ProxyGeneratorTTLMinutes != 180 {
 		t.Fatalf("unexpected generator defaults: %+v", cfg)
 	}
 
@@ -65,6 +65,7 @@ func TestGeneratorConfigAndCountryFilter(t *testing.T) {
 		`{"proxy_generator_blocked_countries":["HKG"]}`,
 		`{"proxy_generator_blocked_countries":["H1"]}`,
 		`{"proxy_generator_ttl_minutes":0}`,
+		`{"proxy_generator_ttl_minutes":181}`,
 		`{"enabled":true,"accounts":[{"account_id":1,"enabled":true,"egress_mode":"generator"}]}`,
 	} {
 		if _, err := ParseConfig([]byte(raw)); err == nil {

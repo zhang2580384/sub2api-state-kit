@@ -35,6 +35,7 @@
           <label for="proxy-generator-url">代理生成器 API</label>
           <input id="proxy-generator-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://example.com/gen?zone=custom&sessType=sticky">
           <p class="help">插件通过第一层代理调用此 API，读取返回的 <code>host:port</code>，并在采集、复验和业务转发期间固定使用该出口。</p>
+          <p class="help">B2Proxy 使用 180 分钟粘性 IP 时，请把“提前更换 IP”设为“否”并保留 <code>sessTime=180&amp;sessAuto=0</code>；<code>sessAuto=1</code> 可能在会话中途更换出口。</p>
           <label for="proxy-generator-blocked-countries">生成器阻止国家或地区</label>
           <input id="proxy-generator-blocked-countries" type="text" autocomplete="off" spellcheck="false" placeholder="HK, CN, RU">
           <p class="help">填写 ISO 两位国家代码，逗号分隔；香港 <code>HK</code> 始终保留，未知出口地区也会被拒绝并重新生成。</p>
@@ -61,9 +62,9 @@
         <details class="card advanced">
           <summary>高级参数 <span class="muted">通常保持默认即可</span></summary>
           <div class="field-grid">
-            <div><label for="ttl-minutes">票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="60" value="60" required></div>
-            <div><label for="refresh-before-seconds">提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="60" required></div>
-            <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="30" value="5" required></div>
+            <div><label for="ttl-minutes">票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="180" value="180" required></div>
+            <div><label for="refresh-before-seconds">提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="120" required></div>
+            <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="180" value="180" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
             <div><label for="attempt-interval-seconds">尝试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>

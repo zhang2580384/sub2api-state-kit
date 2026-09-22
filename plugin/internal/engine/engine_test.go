@@ -125,10 +125,10 @@ func testStart(id int64) *pluginv1.ForwardRequestStart {
 
 func TestConfigStrictIsolation(t *testing.T) {
 	c, err := ParseConfig([]byte(`{}`))
-	if err != nil || c.Enabled || c.TTLMinutes != 60 || c.RefreshBeforeSeconds != 60 || c.PreferPreviousIP || len(c.Accounts) != 0 {
+	if err != nil || c.Enabled || c.TTLMinutes != 180 || c.RefreshBeforeSeconds != 120 || c.PreferPreviousIP || len(c.Accounts) != 0 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
-	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":61}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
+	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"proxy_generator_ttl_minutes":181}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
 	for _, raw := range bad {
 		if _, err := ParseConfig([]byte(raw)); err == nil {
 			t.Errorf("accepted invalid config %s", raw)
@@ -172,7 +172,7 @@ func TestConfigStrictIsolation(t *testing.T) {
 func TestEffectiveRefreshBeforeSeconds(t *testing.T) {
 	c := DefaultConfig()
 	a := AccountConfig{EgressMode: egressModeSub2}
-	if got := effectiveRefreshBefore(c, a); got != 60*time.Second {
+	if got := effectiveRefreshBefore(c, a); got != 120*time.Second {
 		t.Fatalf("default renewal horizon = %s", got)
 	}
 	c.RefreshBeforeSeconds = 30

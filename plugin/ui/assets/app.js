@@ -6,10 +6,10 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
-    proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 5, prefer_previous_ip: false,
-    ttl_minutes: 60, refresh_before_seconds: 60, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
-  const NUMBERS = Object.freeze({ ttl_minutes: [1, 60, '票据有效期'], refresh_before_seconds: [0, 3599, '提前续期'],
-    proxy_generator_ttl_minutes: [1, 30, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
+    proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
+    ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
+  const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '票据有效期'], refresh_before_seconds: [0, 3599, '提前续期'],
+    proxy_generator_ttl_minutes: [1, 180, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
     attempt_interval_seconds: [1, 300, '尝试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],

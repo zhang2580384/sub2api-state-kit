@@ -78,7 +78,9 @@ test('account labels omit empty fields instead of showing placeholder text', () 
 
 test('validates bounds, renewal horizon, duplicate accounts and model allowlist', () => {
   assert.throws(() => ui.validateConfig(configured({ max_attempts: 33 })), /1–32/);
-  assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 61 })), /1–60/);
+  assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 181 })), /1–180/);
+  assert.throws(() => ui.validateConfig(configured({ proxy_generator_ttl_minutes: 181 })), /1–180/);
+  assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 180, refresh_before_seconds: 120, proxy_generator_ttl_minutes: 180 })));
   assert.throws(() => ui.validateConfig(configured({ cooldown_seconds: 29 })), /30–3600/);
   assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 600 })), /必须小于/);
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 30 })));

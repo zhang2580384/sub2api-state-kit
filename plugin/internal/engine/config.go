@@ -16,7 +16,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.0.0"
+const Version = "4.1.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -63,13 +63,13 @@ type AccountConfig struct {
 
 func DefaultConfig() Config {
 	return Config{
-		TTLMinutes:                     60,
-		RefreshBeforeSeconds:           60,
+		TTLMinutes:                     180,
+		RefreshBeforeSeconds:           120,
 		MaxAttempts:                    8,
 		AttemptIntervalSeconds:         10,
 		CooldownSeconds:                300,
 		ProxyGeneratorBlockedCountries: []string{"HK"},
-		ProxyGeneratorTTLMinutes:       5,
+		ProxyGeneratorTTLMinutes:       180,
 		Accounts:                       []AccountConfig{},
 	}
 }
@@ -113,8 +113,8 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.UpstreamProxyID < 0 {
 		return c, errors.New("upstream_proxy_id must be nonnegative")
 	}
-	if c.TTLMinutes < 1 || c.TTLMinutes > 60 {
-		return c, errors.New("ttl_minutes must be 1..60")
+	if c.TTLMinutes < 1 || c.TTLMinutes > 180 {
+		return c, errors.New("ttl_minutes must be 1..180")
 	}
 	if c.RefreshBeforeSeconds < 0 || c.RefreshBeforeSeconds >= c.TTLMinutes*60 {
 		return c, errors.New("refresh_before_seconds must be nonnegative and less than ttl_minutes")
@@ -128,8 +128,8 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.CooldownSeconds < 30 || c.CooldownSeconds > 3600 {
 		return c, errors.New("cooldown_seconds must be 30..3600")
 	}
-	if c.ProxyGeneratorTTLMinutes < 1 || c.ProxyGeneratorTTLMinutes > 30 {
-		return c, errors.New("proxy_generator_ttl_minutes must be 1..30")
+	if c.ProxyGeneratorTTLMinutes < 1 || c.ProxyGeneratorTTLMinutes > 180 {
+		return c, errors.New("proxy_generator_ttl_minutes must be 1..180")
 	}
 	if err := validateProxy(c.UpstreamProxyURL); err != nil {
 		return c, err
