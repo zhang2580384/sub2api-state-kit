@@ -53,6 +53,6 @@ sub2api-state-kit_plugin_v4.1.0_linux-amd64.s2plugin
 <img width="820" height="583" alt="b7482e5dc0cc0d07fdd360a92d9b9f44" src="https://github.com/user-attachments/assets/2531ea91-2f2b-482b-a4ea-3a620ef07c93" />
 界面设置图
 <img width="1104" height="314" alt="image" src="https://github.com/user-attachments/assets/dfb5ad7d-3cee-4692-9bac-3b00441f5f24" />
-<img width="1089" height="527" alt="image" src="https://github.com/user-attachments/assets/88a04eec-5548-44b3-a1fc-cf15e47762b3" />
+
 
 只要支持粘性ip的都可以，但是最低要10分钟以上支持api提取的才行，必须加第一层代理的白名单才能使用，如果宿主机在国外应该是不用第一层代理的。
