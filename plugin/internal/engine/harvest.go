@@ -498,7 +498,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			continue
 		}
 		sessionBound := cookieMode || stateRequiresSession(validatedState)
-		if sessionBound && (sessionID == "" || len(cookies) == 0) {
+		if sessionBound && !sessionArtifactsComplete(validatedState, sessionID, cookies) {
 			reason = "state_session_incomplete"
 			if cookieMode {
 				reason = "cookie_session_incomplete"
@@ -701,7 +701,7 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	if c.RouteCookieReuse {
 		e.rememberRouteCookies(a.AccountID, t.Cookies, c.GatewayPolicy, c.TargetGateway)
 	}
-	if (c.TicketMode == ticketModeCookie || t.SessionBound) && (t.SessionID == "" || len(t.Cookies) == 0) {
+	if (c.TicketMode == ticketModeCookie || t.SessionBound) && !sessionArtifactsComplete(t.State, t.SessionID, t.Cookies) {
 		event.Outcome = "session_incomplete"
 		event.Error = "state_session_incomplete"
 		e.recordDiagnostic(event)

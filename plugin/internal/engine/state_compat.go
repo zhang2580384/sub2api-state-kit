@@ -49,6 +49,13 @@ func stateRequiresSession(state string) bool {
 	return validState(state, compatStateLength)
 }
 
+func sessionArtifactsComplete(state, sessionID string, cookies map[string]string) bool {
+	if strings.TrimSpace(sessionID) == "" || len(cookies) == 0 {
+		return false
+	}
+	return !stateRequiresSession(state) || len(routeCookies(cookies)) > 0
+}
+
 func routeCookies(cookies map[string]string) map[string]string {
 	result := map[string]string{}
 	for _, name := range []string{"__cflb", "__oailb"} {
@@ -154,11 +161,14 @@ func stateAgeSeconds(state string, now time.Time) int64 {
 
 func routeGatewayAcceptance(state string, cookies map[string]string, gatewayPolicy, targetGateways string) (string, string) {
 	gateway := gatewayFromCookies(cookies)
-	if !stateRequiresSession(state) || gatewayPolicy == gatewayPolicyAny {
+	if !stateRequiresSession(state) {
 		return gateway, ""
 	}
 	if len(routeCookies(cookies)) == 0 {
 		return gateway, "gateway_unavailable"
+	}
+	if gatewayPolicy == gatewayPolicyAny {
+		return gateway, ""
 	}
 	if gateway == "" {
 		return "", "gateway_unknown"

@@ -486,6 +486,42 @@ func TestState780DenyPolicyAllowsUnlistedGateway(t *testing.T) {
 	}
 }
 
+func TestState780AnyPolicyStillRejectsMissingRouteCookies(t *testing.T) {
+	for name, routeCookies := range map[string]map[string]string{
+		"missing __cflb":  {"__cf_bm": "present", "__oailb": "unified-88"},
+		"missing __oailb": {"__cf_bm": "present", "__cflb": "lb"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := testHost(42)
+			pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for cookieName, value := range routeCookies {
+					http.SetCookie(w, &http.Cookie{Name: cookieName, Value: value})
+				}
+				w.Header().Set(StateHeader, testState(780))
+				completed(w, "gpt-6-astra")
+			}))
+			defer pool.Close()
+			var businessCalls atomic.Int32
+			business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				businessCalls.Add(1)
+				completed(w, "gpt-6-astra")
+			}))
+			defer business.Close()
+
+			e := testEngine(t, h, business.URL)
+			c := testConfig(pool.URL, 42)
+			c.AllowState780 = true
+			c.GatewayPolicy = gatewayPolicyAny
+			c.TargetGateway = ""
+			apply(t, e, c)
+			waitFor(t, e, "cooldown")
+			if businessCalls.Load() != 0 {
+				t.Fatalf("780 without a complete route pair reached business validation %d times", businessCalls.Load())
+			}
+		})
+	}
+}
+
 func TestCookieValidationPersistsRollingStateAndCookie(t *testing.T) {
 	h := testHost(42)
 	captureState := testState(780)

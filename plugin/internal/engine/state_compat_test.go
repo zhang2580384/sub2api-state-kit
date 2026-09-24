@@ -74,8 +74,17 @@ func TestRouteGatewayAcceptance(t *testing.T) {
 	if _, reason := routeGatewayAcceptance(testFernetState(780, time.Now()), map[string]string{"__cf_bm": "only"}, gatewayPolicyAllow, "unified-88"); reason != "gateway_unavailable" {
 		t.Fatalf("missing route pair reason = %q; want gateway_unavailable", reason)
 	}
+	if _, reason := routeGatewayAcceptance(testFernetState(780, time.Now()), map[string]string{"__cf_bm": "present", "__oailb": "unified-88"}, gatewayPolicyAllow, "unified-88"); reason != "gateway_unavailable" {
+		t.Fatalf("missing __cflb reason = %q; want gateway_unavailable", reason)
+	}
+	if _, reason := routeGatewayAcceptance(testFernetState(780, time.Now()), map[string]string{"__cf_bm": "present", "__cflb": "lb"}, gatewayPolicyAllow, "unified-88"); reason != "gateway_unavailable" {
+		t.Fatalf("missing __oailb reason = %q; want gateway_unavailable", reason)
+	}
 	if _, reason := routeGatewayAcceptance(testFernetState(780, time.Now()), map[string]string{"__cf_bm": "only"}, gatewayPolicyDeny, "unified-88"); reason != "gateway_unavailable" {
 		t.Fatalf("deny policy accepted a missing route pair: %q", reason)
+	}
+	if _, reason := routeGatewayAcceptance(testFernetState(780, time.Now()), map[string]string{"__cf_bm": "only"}, gatewayPolicyAny, ""); reason != "gateway_unavailable" {
+		t.Fatalf("any policy accepted a missing route pair: %q", reason)
 	}
 	if _, reason := routeGatewayAcceptance(testFernetState(780, time.Now()), map[string]string{"__cflb": "lb", "__oailb": "unknown"}, gatewayPolicyDeny, "unified-88"); reason != "gateway_unknown" {
 		t.Fatalf("deny policy accepted an unknown gateway: %q", reason)
@@ -127,6 +136,21 @@ func TestLegacy780TicketRequiresSessionAndRollsForward(t *testing.T) {
 	missingCookies.Cookies = nil
 	if validTicket(&missingCookies, c, a, "gpt-6-astra", now) {
 		t.Fatal("legacy 780 ticket without cookies was accepted")
+	}
+	c.GatewayPolicy = gatewayPolicyAny
+	c.TargetGateway = ""
+	for name, cookies := range map[string]map[string]string{
+		"missing __cflb":  {"__cf_bm": "present", "__oailb": "unified-88"},
+		"missing __oailb": {"__cf_bm": "present", "__cflb": "lb"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			missingRouteCookie := *current
+			missingRouteCookie.Cookies = cookies
+			missingRouteCookie.ConfigFingerprint = configFingerprint(c, a, "gpt-6-astra")
+			if validTicket(&missingRouteCookie, c, a, "gpt-6-astra", now) {
+				t.Fatal("legacy 780 ticket without a complete route pair was accepted")
+			}
+		})
 	}
 
 	e := &Engine{config: c, tickets: map[string]*ticket{keyFor(7, "gpt-6-astra"): current}}

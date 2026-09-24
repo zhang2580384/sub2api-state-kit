@@ -458,7 +458,7 @@ func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Ti
 		return false
 	}
 	if c.TicketMode == ticketModeCookie || t.SessionBound {
-		if t.SessionID == "" || len(t.Cookies) == 0 {
+		if !sessionArtifactsComplete(t.State, t.SessionID, t.Cookies) {
 			return false
 		}
 	}

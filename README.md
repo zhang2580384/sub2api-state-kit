@@ -1,6 +1,6 @@
 # Sub2API STATE Kit 插件
 
-本仓库维护 Sub2API `v0.2.8` 的独立 `.s2plugin` 插件，不覆盖宿主源码。`4.5.1` 把 `780` 目标网关从单一固定值改为 `allow / deny / any` 三态策略，默认使用 `allow` 和 `unified-15,unified-88,unified-180`；诊断面板可拖动、固定大尺寸并查看最近 5 小时的仅内存事件。
+本仓库维护 Sub2API `v0.2.8` 的独立 `.s2plugin` 插件，不覆盖宿主源码。`4.5.2` 修复 `780` 路由 Cookie 完整性，要求 `__cflb` 和 `__oailb` 同时存在；`any` 只取消网关白/黑名单判断，不再绕过这项检查。
 
 ## 最短配置
 
@@ -54,7 +54,7 @@
 7. “网关策略”选择 `allow`、`deny` 或 `any`；前两种再填写 `15,88,180` 或 `unified-15,unified-88,unified-180`。
 8. 保存后先用实际模型请求确认跨出口仍返回目标模型。
 
-`780` 模式的有效链路来自实际成功样本和参考实现：请求前注入当前 STATE、会话 Cookie 和 `session_id`；打票必须返回策略允许的 `__cflb/__oailb` 路由对，响应可能返回一张新的 `780` 和新的 `__cf_bm`。`allow` 只允许列表内网关，`deny` 只拒绝列表内网关，`any` 不限制网关。缺少路由 Cookie 或网关无法识别时，`allow/deny` 都会丢弃并重打。插件保存的是业务出口复验返回的新票，不是最初采集到的那张票。
+`780` 模式的有效链路来自实际成功样本和参考实现：请求前注入当前 STATE、会话 Cookie 和 `session_id`；打票必须返回完整的 `__cflb/__oailb` 路由对，响应可能返回一张新的 `780` 和新的 `__cf_bm`。`allow` 只允许列表内网关，`deny` 只拒绝列表内网关，`any` 不限制网关。`any` 只取消网关白/黑名单判断，不会绕过路由 Cookie 完整性；缺少 `__cflb` 或 `__oailb`、网关无法识别时都会丢弃并重打。插件保存的是业务出口复验返回的新票，不是最初采集到的那张票。
 
 推荐参数：
 
@@ -82,10 +82,17 @@
 
 因此多出的是“业务出口复验”，不是无效查票。续期或备用票获取期间，当前仍可用的旧票继续服务。
 
+## 4.5.2 修复内容
+
+- `780` 票据必须同时携带非空 `__cflb` 和 `__oailb`，缺少任一项都返回 `gateway_unavailable` 并快速重打；
+- 网关策略为 `any` 时仍执行路由 Cookie 完整性检查，`any` 只取消网关白/黑名单判断；
+- 备用票恢复、内存票据恢复和打票完成后持久化前使用同一完整性规则，避免绕过入口不一致；
+- 增加分别缺少 `__cflb`、缺少 `__oailb` 的规则测试和引擎测试。
+
 ## 4.5.1 新增内容
 
 - 网关策略新增 `allow / deny / any` 三态；旧配置会自动迁移，原白名单默认迁移为 `allow`，原来的 `any` 或空列表迁移为 `any`；
-- `allow` 只允许列表内网关，`deny` 只拒绝列表内网关，`any` 不限制网关；缺少路由 Cookie 或无法识别网关时 `allow/deny` 仍会重打；
+- `allow` 只允许列表内网关，`deny` 只拒绝列表内网关，`any` 不限制网关；`allow/deny` 在 `4.5.1` 已要求完整的 `__cflb/__oailb`，`any` 的完整性缺口由 `4.5.2` 修复；
 - 默认候选为 `unified-15,unified-88,unified-180`，不再把 `unified-88` 当成唯一正确网关；
 - 复用上一轮 Cookie 时，只复用仍然符合当前策略且未过期的路由对；
 - 实时诊断窗口固定为大尺寸并支持标题栏拖动，表格和网关统计区独立滚动，不再持续撑高宿主页面；
@@ -170,13 +177,13 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 Linux amd64 主机优先下载专用包：
 
 ```text
-sub2api-state-kit_plugin_v4.5.1_linux_amd64.s2plugin
+sub2api-state-kit_plugin_v4.5.2_linux_amd64.s2plugin
 ```
 
 需要在多个平台间复用时下载通用包：
 
 ```text
-sub2api-state-kit_plugin_v4.5.1.s2plugin
+sub2api-state-kit_plugin_v4.5.2.s2plugin
 ```
 
 `linux_amd64` 专用包只包含当前平台 runtime，体积更小；通用包包含 Linux amd64、Linux arm64 和 macOS arm64 runtime。首次安装先把 Release 中的 `trusted-publisher.yaml` 合并到宿主现有 `config.yaml`，重启一次 Sub2API，再上传 `.s2plugin`。已安装旧版时可以直接升级，配置会保留。
