@@ -85,7 +85,7 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 1. 从 Release 下载 `trusted-publisher.yaml`，把其中公钥合并到宿主现有 `config.yaml`，不要覆盖原配置。
 2. 重启一次 Sub2API，使公钥生效。
-3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.0_linux-amd64.s2plugin`；ARM64 使用对应包。
+3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.0.s2plugin`。该包包含 Linux amd64、Linux arm64 和 macOS arm64 runtime，安装器会按宿主平台选择。
 4. 确认插件已签名、受信任、已启用，灰度 `100%`。
 5. 同类 OpenAI OAuth transport 插件只启用一个。
 
@@ -143,6 +143,6 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 - Cookie 票据无效：确认响应同时有 STATE、`session_id` 和 Cookie。
 - 备用票不出现：确认开关和提前时间正确，并查看诊断错误。
 - 292 仍变化：代理出口不变也可能发生，这是上游会话生命周期变化。
-- 升级：直接上传同架构新 `.s2plugin`，配置会保留。
+- 升级：直接上传新版 `.s2plugin`，配置会保留。
 
 插件不会保存 OAuth Token、Cookie、STATE、代理凭据、API Key 或签名私钥到诊断日志。

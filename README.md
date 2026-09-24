@@ -113,12 +113,12 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 ## 安装
 
-下载对应架构的包：
+下载通用包：
 
 ```text
-sub2api-state-kit_plugin_v4.3.0_linux-amd64.s2plugin
+sub2api-state-kit_plugin_v4.3.0.s2plugin
 ```
 
-首次安装先把 Release 中的 `trusted-publisher.yaml` 合并到宿主现有 `config.yaml`，重启一次 Sub2API，再上传同架构 `.s2plugin`。已安装旧版时可以直接升级，配置会保留。
+包内包含 Linux amd64、Linux arm64 和 macOS arm64 runtime，安装器会按宿主平台选择。首次安装先把 Release 中的 `trusted-publisher.yaml` 合并到宿主现有 `config.yaml`，重启一次 Sub2API，再上传 `.s2plugin`。已安装旧版时可以直接升级，配置会保留。
 
 完整说明见 [插件安装与使用指南](docs/plugin.md)，探测和验证边界见 [插件验证记录](docs/plugin-validation.md)。
