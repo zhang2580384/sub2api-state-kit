@@ -84,10 +84,6 @@
         expires_at: safeAccountText(account.expires_at, 'expires_at'), quota: safeAccountText(account.quota, 'quota') };
     }).filter(Boolean).slice(0, 1000);
   }
-  function proxyID(value) {
-    const number = Number(value);
-    return Number.isSafeInteger(number) && number >= 0 ? number : null;
-  }
   function validateProxyAddress(value, label) {
     if (typeof value !== 'string') throw new Error(label + '格式不正确。');
     if (value === '') return;
@@ -163,7 +159,6 @@
   }
   function validateConfig(config) {
     if (typeof config.enabled !== 'boolean') throw new Error('总开关格式不正确。');
-    if (proxyID(config.upstream_proxy_id) === null) throw new Error('第一层代理编号格式不正确。');
     validateProxyAddress(config.upstream_proxy_url, '第一层代理');
     validateProxyAddress(config.dynamic_proxy_url, '动态代理');
     validateProxyAddress(config.cookie_capture_proxy_url, 'Cookie 模式采集代理');
@@ -229,9 +224,6 @@
     if (config.enabled && config.ticket_mode === 'cookie' && config.accounts.some(function (account) { return account.enabled; })) {
       if (config.cookie_capture_mode === 'socks5' && !config.cookie_capture_proxy_url) throw new Error('Cookie 模式选择 S5/HTTP 固定采集代理时，请填写采集代理。');
       if (config.cookie_capture_mode === 'generator' && !config.proxy_generator_url) throw new Error('Cookie 模式选择代理生成器打票时，请填写代理生成器地址。');
-    }
-    if (config.upstream_proxy_id > 0 && !config.upstream_proxy_url) {
-      throw new Error('所选第一层代理缺少可用的代理地址。');
     }
     return config;
   }
@@ -331,12 +323,8 @@
     let pollTimer;
     let resizeObserver;
     let accounts = [];
-    let hostAccountCatalog = [];
     let statusAccountCatalog = [];
     let lastDiagnostics = [];
-    let proxies = [];
-    let savedUpstreamProxyID = 0;
-    let savedUpstreamProxyURL = '';
     const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_seconds: 'refresh-before-seconds',
       proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
       cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', standby_lead_seconds: 'standby-lead-seconds',
@@ -470,23 +458,14 @@
     }
     function accountMetadataByID(id) {
       const local = accounts.find(function (account) { return account.account_id === id; });
-      const host = hostAccountCatalog.find(function (account) { return account.account_id === id; });
       const remote = statusAccountCatalog.find(function (account) { return account.account_id === id; });
       return {
         account_id: id,
-        name: accountName(host) || accountName(local) || accountName(remote),
-        email: accountEmail(host) || accountEmail(local) || accountEmail(remote),
-        expires_at: accountText(host && host.expires_at, 'expires_at') || accountText(local && local.expires_at, 'expires_at') || accountText(remote && remote.expires_at, 'expires_at'),
-        quota: accountText(host && host.quota, 'quota') || accountText(local && local.quota, 'quota') || accountText(remote && remote.quota, 'quota')
+        name: accountName(local) || accountName(remote),
+        email: accountEmail(local) || accountEmail(remote),
+        expires_at: accountText(local && local.expires_at, 'expires_at') || accountText(remote && remote.expires_at, 'expires_at'),
+        quota: accountText(local && local.quota, 'quota') || accountText(remote && remote.quota, 'quota')
       };
-    }
-    function mergeHostAccountMetadata(account) {
-      const host = hostAccountCatalog.find(function (item) { return item.account_id === account.account_id; });
-      if (!host) return account;
-      ['name', 'email', 'expires_at', 'quota'].forEach(function (key) {
-        if (host[key]) account[key] = host[key];
-      });
-      return account;
     }
     function renderDetectedAccounts(ids) {
       const select = byID('new-account-id');
@@ -500,53 +479,10 @@
         select.appendChild(option);
       });
     }
-    function renderProxyOptions(selectedID) {
-      const select = byID('upstream-proxy-id');
-      select.replaceChildren();
-      const none = element('option', '不使用第一层，动态代理直连');
-      none.value = '0';
-      select.appendChild(none);
-      proxies.forEach(function (item) {
-        const option = element('option', item.name + ' · ' + item.protocol + '://' + item.host + ':' + item.port);
-        option.value = String(item.id);
-        select.appendChild(option);
-      });
-      if (selectedID > 0 && !proxies.some(function (item) { return item.id === selectedID; })) {
-        const missing = element('option', 'ID ' + selectedID + ' · 当前列表不可用（保留已保存地址）');
-        missing.value = String(selectedID);
-        missing.disabled = true;
-        select.appendChild(missing);
-      }
-      select.value = String(selectedID || 0);
-    }
-    function normalizeProxies(response) {
-      const source = response && Array.isArray(response.proxies) ? response.proxies : [];
-      return source.map(function (item) {
-        const id = accountID(item && item.id);
-        if (id === null || !item || typeof item.url !== 'string') return null;
-        try {
-          validateProxyAddress(item.url, '第一层代理');
-          const url = new URL(item.url);
-          return {
-            id: id,
-            name: typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 120) : '未命名代理',
-            protocol: url.protocol.slice(0, -1),
-            host: url.hostname,
-            port: url.port || (url.protocol === 'https:' ? '443' : '80'),
-            url: item.url
-          };
-        } catch (_) {
-          return null;
-        }
-      }).filter(Boolean).slice(0, 1000);
-    }
     function applyConfig(input) {
       const config = normalizeConfig(input);
       byID('enabled').checked = config.enabled === true;
-      savedUpstreamProxyID = proxyID(config.upstream_proxy_id);
-      if (savedUpstreamProxyID === null) savedUpstreamProxyID = 0;
-      savedUpstreamProxyURL = config.upstream_proxy_url;
-      renderProxyOptions(savedUpstreamProxyID);
+      byID('upstream-proxy-url').value = config.upstream_proxy_url;
       byID('dynamic-proxy-url').value = config.dynamic_proxy_url;
       byID('ticket-mode').value = config.ticket_mode;
       byID('cookie-capture-mode').value = config.cookie_capture_mode;
@@ -559,25 +495,17 @@
       byID('request-rewrite-enabled').checked = config.request_rewrite_enabled === true;
       byID('default-request-timezone').value = config.default_request_timezone;
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
-      accounts = config.accounts.map(mergeHostAccountMetadata);
+      accounts = config.accounts;
       renderAccounts();
       renderTicketMode();
       dirty = false;
       updateSaveState();
     }
     function formConfig() {
-      const selectedProxyID = proxyID(byID('upstream-proxy-id').value);
-      let upstreamProxyURL = '';
-      if (selectedProxyID === savedUpstreamProxyID) {
-        upstreamProxyURL = savedUpstreamProxyURL;
-      } else if (selectedProxyID > 0) {
-        const selected = proxies.find(function (item) { return item.id === selectedProxyID; });
-        upstreamProxyURL = selected ? selected.url : '';
-      }
       const config = {
         enabled: byID('enabled').checked,
-        upstream_proxy_id: selectedProxyID === null ? NaN : selectedProxyID,
-        upstream_proxy_url: upstreamProxyURL,
+        upstream_proxy_id: 0,
+        upstream_proxy_url: byID('upstream-proxy-url').value.trim(),
         dynamic_proxy_url: byID('dynamic-proxy-url').value.trim(),
         ticket_mode: byID('ticket-mode').value,
         cookie_capture_mode: byID('cookie-capture-mode').value,
@@ -609,7 +537,7 @@
       byID('status-summary').textContent = status.message || (status.host_ready ? '状态已更新' : '等待宿主提供账号信息；可先保存配置。');
       statusAccountCatalog = status.account_catalog.slice();
       renderDetectedAccounts(status.account_ids);
-      byID('account-discovery').textContent = status.account_ids.length ? '发现 ' + status.account_ids.length + ' 个账号。名称、邮箱、到期时间和额度会从账号管理同步。' : '暂未发现账号，也可以手动填写 ID。宿主不会向此页面提供账号 Token。';
+      byID('account-discovery').textContent = status.account_ids.length ? '发现 ' + status.account_ids.length + ' 个账号。下拉只提供账号 ID；名称、邮箱、到期时间和额度请在添加后填写。' : '暂未发现账号，也可以手动填写 ID。宿主不会向此页面提供账号 Token。';
       const body = byID('tickets-body'); body.replaceChildren();
       status.tickets.forEach(function (ticket) {
         const id = accountID(ticket.account_id);
@@ -736,6 +664,11 @@
       input.type = reveal ? 'text' : 'password'; byID('toggle-proxy').textContent = reveal ? '隐藏' : '显示';
       byID('toggle-proxy').setAttribute('aria-pressed', String(reveal));
     });
+    byID('toggle-upstream-proxy').addEventListener('click', function () {
+      const input = byID('upstream-proxy-url'); const reveal = input.type === 'password';
+      input.type = reveal ? 'text' : 'password'; byID('toggle-upstream-proxy').textContent = reveal ? '隐藏' : '显示';
+      byID('toggle-upstream-proxy').setAttribute('aria-pressed', String(reveal));
+    });
     byID('test-config').addEventListener('click', async function () {
       if (busy || !loaded) return;
       setBusy(true); notice('正在检查已保存配置；未保存修改不参与检查。');
@@ -813,24 +746,10 @@
       try {
         if (!bridge) throw new Error('配置桥接未加载，请重新打开插件配置页。');
         bridge.ready();
-        let proxyLoadError = '';
-        let accountLoadError = '';
-        try {
-          proxies = normalizeProxies(await bridge.proxies());
-        } catch (error) {
-          proxyLoadError = error && error.message ? error.message : '无法读取 IP 管理代理列表。';
-        }
-        try {
-          hostAccountCatalog = normalizeAccountCatalog(await bridge.accounts());
-        } catch (error) {
-          accountLoadError = error && error.message ? error.message : '无法从账号管理同步账号信息。';
-        }
         const response = await bridge.load();
         if (closed) return;
         applyConfig(response.config); loaded = true; setBusy(false); resize();
         if (global.ResizeObserver) { resizeObserver = new global.ResizeObserver(resize); resizeObserver.observe(document.body); }
-        if (proxyLoadError) notice('无法读取 IP 管理代理列表：' + proxyLoadError, 'error');
-        else if (accountLoadError) notice('账号管理资料暂未同步，下拉将只显示账号 ID：' + accountLoadError, 'warning');
         await refreshStatus();
         if (!closed) pollTimer = global.setInterval(function () { if (document.visibilityState !== 'hidden') refreshStatus(); }, 10000);
       } catch (error) { if (!closed) { notice(error.message, 'error'); updateSaveState('配置未加载'); byID('connection-status').textContent = '连接失败'; } }

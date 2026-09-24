@@ -1,6 +1,6 @@
 # 插件版验证记录
 
-对象：STATE Kit 独立插件 `4.3.0`，宿主基线为官方 Sub2API `v0.2.8`。
+对象：STATE Kit 独立插件 `4.3.1`，宿主基线为官方 Sub2API `v0.2.8`。
 
 ## 自动化验证
 
@@ -9,7 +9,7 @@
 - `go test ./... -count=1`：通过。
 - `CGO_ENABLED=1 go test -race ./... -count=1`：通过，使用官方要求的 Go `1.27.0`。
 - `go vet ./...`：通过。
-- `node --test ui-tests/*.test.cjs`：32 项通过。
+- `node --test ui-tests/*.test.cjs`：31 项通过。
 - `node --check ui/assets/app.js`：通过。
 - `node --check ui/assets/bridge-v1.js`：通过。
 - Python 打包脚本语法检查：通过。
@@ -32,6 +32,14 @@
 - HostService v2 中 `schedulable=false` 的账号不会进入获取队列；
 - 请求环境替换只修改已有字段，账号级时区覆盖和受限时区拒绝符合预期；
 - UI 模式切换、字段校验、保存、状态显示和诊断脱敏。
+- 配置页不再调用官方 `v0.2.8` 不支持的 `proxies.list`、`accounts.list` Bridge 方法；第一层代理改为手动填写完整地址并保存。
+
+### 4.3.1 配置页超时修复
+
+- 官方 `v0.2.8` UI Bridge 仅支持 `config.load`、`config.save`、`config.test`、`plugin.status`、`ui.resize` 和 `ui.notify`；
+- 旧版额外调用的 `proxies.list` 与 `accounts.list` 不存在，会固定等待 20 秒后返回“宿主响应超时”；
+- `4.3.1` 已移除这两个调用，第一层代理直接保存为 `upstream_proxy_url`；
+- 后端不再依赖列表返回的 `upstream_proxy_id`，保存时统一写入 `0`，代理链和票据逻辑保持不变。
 
 ### 4.3.0 保留的获取链路优化
 
@@ -117,7 +125,7 @@ sessType=sticky&sessTime=180
 
 ## 未完成项
 
-- 尚未把 `4.3.0` 部署回线上 Sub2API 实例执行升级和回退验收。
+- 尚未把 `4.3.1` 部署回线上 Sub2API 实例执行升级和回退验收。
 - 粘性出口长测已观察到 `87.91` 分钟未换 IP，但尚未完整运行到 180 分钟。
 - Cookie 分流跨出口已有连续 `4/4` 实测，仍需更多账号、地区和长时间样本。
 - 单张 292 尚未观察到持续 10 分钟以上的本轮样本，因此不宣称上游 292 能保持 180 分钟。

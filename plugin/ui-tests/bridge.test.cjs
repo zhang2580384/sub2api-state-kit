@@ -85,21 +85,11 @@ test('test uses saved config without transmitting unsaved form data', async () =
   h.bridge.dispose();
 });
 
-test('proxy list uses an explicit read-only bridge request', async () => {
+test('bridge does not call host methods absent from Sub2API 0.2.8', () => {
   const h = harness();
-  const promise = h.bridge.proxies();
-  assert.equal(h.posted[0].data.type, 'proxies.list');
-  h.respond(0, { proxies: [{ id: 17 }] });
-  assert.equal((await promise).proxies[0].id, 17);
-  h.bridge.dispose();
-});
-
-test('account list uses an explicit read-only bridge request', async () => {
-  const h = harness();
-  const promise = h.bridge.accounts();
-  assert.equal(h.posted[0].data.type, 'accounts.list');
-  h.respond(0, { accounts: [{ account_id: 40, name: 'account', email: 'account@example.com' }] });
-  assert.equal((await promise).accounts[0].account_id, 40);
+  assert.equal(typeof h.bridge.proxies, 'undefined');
+  assert.equal(typeof h.bridge.accounts, 'undefined');
+  assert.equal(h.posted.length, 0);
   h.bridge.dispose();
 });
 

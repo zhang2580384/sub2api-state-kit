@@ -1,7 +1,7 @@
 (function (global) {
   'use strict';
   const pending = new Map();
-  const responseTypes = new Set(['config.load', 'config.save', 'config.test', 'plugin.status', 'proxies.list', 'accounts.list']);
+  const responseTypes = new Set(['config.load', 'config.save', 'config.test', 'plugin.status']);
   const token = new URLSearchParams(global.location.hash.slice(1)).get('bridge_token');
   let origin = '';
   let closed = false;
@@ -73,8 +73,6 @@
     save: function (config) { return request('config.save', { config: config }, 120000); },
     test: function () { return request('config.test', {}, 120000); },
     status: function () { return request('plugin.status'); },
-    proxies: function () { return request('proxies.list'); },
-    accounts: function () { return request('accounts.list', {}, 5000); },
     ready: function () { send('sub2api.plugin.ready'); },
     resize: function (height) { if (Number.isFinite(height)) send('ui.resize', { height: Math.max(520, Math.min(960, Math.round(height))) }); },
     dispose: dispose

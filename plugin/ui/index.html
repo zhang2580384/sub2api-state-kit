@@ -32,9 +32,9 @@
             <option value="cookie">Cookie 分流：打票和业务可以使用不同出口</option>
           </select>
           <p id="ticket-mode-help" class="help">固定出口适合已验证的粘性 IP；Cookie 分流允许业务使用另一个出口。</p>
-          <label for="upstream-proxy-id">第一层：IP 管理代理（两种方式共用）</label>
-          <select id="upstream-proxy-id"><option value="0">不使用第一层</option></select>
-          <p id="upstream-proxy-help" class="help">用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。</p>
+          <label for="upstream-proxy-url">第一层：S5/HTTP 代理地址（两种方式共用）</label>
+          <div class="input-action"><input id="upstream-proxy-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="socks5h://user:pass@proxy.example:1080"><button id="toggle-upstream-proxy" type="button" class="secondary" aria-controls="upstream-proxy-url" aria-pressed="false">显示</button></div>
+          <p id="upstream-proxy-help" class="help">直接粘贴完整地址，用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。官方 0.2.8 插件页不提供 IP 管理代理列表。</p>
           <div class="inline-switch"><label class="switch-label" for="request-rewrite-enabled"><input id="request-rewrite-enabled" type="checkbox" role="switch"><span>统一请求环境日期、时区与语言</span></label></div>
           <label for="default-request-timezone">默认请求时区</label>
           <input id="default-request-timezone" type="text" list="timezone-options" autocomplete="off" spellcheck="false" placeholder="Asia/Singapore">
@@ -87,7 +87,7 @@
             <div class="manual-id"><label for="manual-account-id">手动账号 ID</label><input id="manual-account-id" type="text" inputmode="numeric" autocomplete="off" placeholder="或输入 ID"></div>
             <button id="add-account" type="button" class="secondary">添加账号</button>
           </div>
-          <p id="account-discovery" class="help">名称、邮箱、到期时间和额度会从账号管理同步；同步不可用时仅显示账号 ID。</p>
+          <p id="account-discovery" class="help">已发现账号下拉只同步账号 ID；名称、邮箱、到期时间和额度请在添加后填写。</p>
           <div class="table-wrap"><table class="accounts-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号资料</th><th scope="col">开关</th><th scope="col">出口方式</th><th scope="col">账号粘性代理</th><th scope="col">套餐 / 票据</th><th scope="col">模型</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="accounts-body"></tbody></table></div>
           <p id="accounts-empty" class="empty">尚未添加账号。添加后选择出口模式、套餐和模型，再手动开启。</p>
           <p class="help">Sub2 原有代理保持宿主行为；账号粘性代理模式使用你填写的固定 session；代理生成器模式由插件调用 API 取得固定 <code>host:port</code>。粘性代理不接受 <code>{random}</code> 或 <code>{sid}</code>；从聊天复制的 <code>\@</code> 请改成普通 <code>@</code>。</p>

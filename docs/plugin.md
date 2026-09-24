@@ -1,6 +1,6 @@
 # STATE Kit 插件使用指南
 
-适用于独立插件 `4.3.0` 和官方 Sub2API `v0.2.8`。插件不修改宿主源码，安装包为 `.s2plugin`。
+适用于独立插件 `4.3.1` 和官方 Sub2API `v0.2.8`。插件不修改宿主源码，安装包为 `.s2plugin`。
 
 ## 1. 先选运行方式
 
@@ -20,11 +20,13 @@
 
 ## 2. 页面填写规则
 
-第一层“IP 管理代理”两种方式共用，始终显示：
+第一层 S5/HTTP 代理地址由用户直接填写，两种方式共用：
 
 - 代理生成器方式下，用于访问生成器 API；
 - Cookie 分流的业务固定代理留空时，也作为业务出口；
 - 固定 S5/HTTP 采集代理方式下，可作为前置代理。
+
+直接填写完整的 `http`、`https`、`socks5` 或 `socks5h` 地址。官方 Sub2API `v0.2.8` 插件页不提供“IP 管理代理列表”，`4.3.1` 已移除对不存在的 `proxies.list`、`accounts.list` Bridge 方法的调用，不会再等待 20 秒后报读取失败。
 
 ### 请求环境统一
 
@@ -40,7 +42,7 @@
 
 | 字段 | 填写 |
 | --- | --- |
-| 第一层 | 可访问生成器的代理 |
+| 第一层 | 可访问生成器的完整 S5/HTTP 代理地址 |
 | 代理生成器 API | B2Proxy 完整 `.../gen?...` 地址 |
 | 账号出口方式 | 代理生成器 |
 | 禁止出口地区 | `HK` |
@@ -51,7 +53,7 @@ Cookie 分流需要：
 
 | 字段 | 填写 |
 | --- | --- |
-| 第一层 | 与稳定模式相同 |
+| 第一层 | 与稳定模式相同的完整代理地址 |
 | 打票方式 | 代理生成器 API，或已验证的 S5/HTTP 固定采集代理 |
 | Cookie 模式采集代理 | 生成器方式留空；固定采集代理方式必填 |
 | Cookie 模式业务固定代理 | 留空使用第一层，也可填写独立出口 |
@@ -85,7 +87,7 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 1. 从 Release 下载 `trusted-publisher.yaml`，把其中公钥合并到宿主现有 `config.yaml`，不要覆盖原配置。
 2. 重启一次 Sub2API，使公钥生效。
-3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.0.s2plugin`。该包包含 Linux amd64、Linux arm64 和 macOS arm64 runtime，安装器会按宿主平台选择。
+3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.1.s2plugin`。该包包含 Linux amd64、Linux arm64 和 macOS arm64 runtime，安装器会按宿主平台选择。
 4. 确认插件已签名、受信任、已启用，灰度 `100%`。
 5. 同类 OpenAI OAuth transport 插件只启用一个。
 
@@ -104,8 +106,10 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 ## 6. 速度与参数
 
-`4.3.0` 保留 `4.2.1` 的速度优化，并增加 HostService v2 暂停账号过滤和请求环境统一：
+`4.3.1` 保留 `4.3.0` 的 HostService v2 暂停账号过滤和请求环境统一，并修复配置页超时：
 
+- 第一层代理直接填写，不再调用不存在的 IP 管理代理列表和账号列表 Bridge；
+- 已发现账号下拉只提供 ID，账号资料可在添加后填写；
 - IP 与地区查询合并；
 - 同出口复验只复核 IP 是否变化，不重复查询地区；
 - 地区被拦截、312、STATE 长度不符和复验失败会自动快速重试；

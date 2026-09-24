@@ -46,8 +46,8 @@ test('requires dynamic proxy only when global and account switches are both on',
   config.dynamic_proxy_url = 'javascript:alert(1)';
   assert.throws(() => ui.validateConfig(config), /HTTP/);
   config.dynamic_proxy_url = 'socks5h://proxy.example:1080';
-  config.upstream_proxy_id = 17;
-  assert.throws(() => ui.validateConfig(config), /缺少可用/);
+  config.upstream_proxy_url = 'socks5://first.example:1081';
+  assert.equal(ui.validateConfig(config), config);
 });
 
 test('account egress mode can use a fixed provider session without the global dynamic pool', () => {
@@ -119,7 +119,7 @@ test('legacy mode supports standby tickets and always keeps the first-layer prox
   h.get('ticket-mode').value = 'cookie';
   await h.get('ticket-mode').fire('change');
   assert.equal(h.get('legacy-mode-fields').hidden, true);
-  assert.equal(h.get('upstream-proxy-id').hidden, false);
+  assert.equal(h.get('upstream-proxy-url').hidden, false);
   assert.equal(h.get('standby-ticket-enabled').disabled, false);
   assert.equal(h.get('generator-fields').hidden, false);
   assert.equal(h.get('cookie-socks5-fields').hidden, true);
@@ -226,7 +226,7 @@ class Node {
 
 function uiHarness() {
   const elements = new Map();
-  const calls = { load: 0, save: [], test: 0, status: 0, proxies: 0, accounts: 0, dispose: 0 };
+  const calls = { load: 0, save: [], test: 0, status: 0, dispose: 0 };
   const timers = new Map();
   const document = { getElementById: id => { if (!elements.has(id)) elements.set(id, new Node('div')); return elements.get(id); },
     createElement: tag => new Node(tag), documentElement: { scrollHeight: 900 }, body: new Node('body'), visibilityState: 'visible' };
@@ -236,9 +236,7 @@ function uiHarness() {
     async load() { calls.load++; return { config }; },
     async save(value) { calls.save.push(value); return { config: value }; },
     async test() { calls.test++; return { result: { message: '检查通过' } }; },
-    async status() { calls.status++; return { result: { status_json: JSON.stringify(status) } }; },
-    async proxies() { calls.proxies++; return { proxies: [{ id: 17, name: '示例代理', protocol: 'socks5', host: '203.0.113.17', port: 1081, url: 'socks5://proxy-user:test-only@203.0.113.17:1081' }] }; },
-    async accounts() { calls.accounts++; return { accounts: [{ account_id: 12, name: '账号十二', email: 'account12@example.com', expires_at: '2026-10-17', quota: '0 / 3' }] }; } };
+    async status() { calls.status++; return { result: { status_json: JSON.stringify(status) } }; } };
   const global = { document, Sub2APIPluginBridge: bridge, setInterval: fn => { timers.set(1, fn); return 1; }, clearInterval: id => timers.delete(id), addEventListener() {}, removeEventListener() {} };
   const runtime = ui.start(global);
   return { elements, get: document.getElementById, calls, timers, runtime, setStatus: value => { status = value; } };
@@ -253,7 +251,7 @@ test('passive status refresh preserves unsaved form and never invokes test or sa
   await h.runtime.refreshStatus();
   assert.equal(h.get('dynamic-proxy-url').value, 'socks5h://unsaved:password@proxy.example:1080');
   assert.equal(h.get('save-state').textContent, '有未保存修改');
-  assert.equal(h.calls.load, 1); assert.equal(h.calls.save.length, 0); assert.equal(h.calls.test, 0); assert.equal(h.calls.accounts, 1);
+  assert.equal(h.calls.load, 1); assert.equal(h.calls.save.length, 0); assert.equal(h.calls.test, 0);
   assert.equal(h.get('new-account-id').children.length, 4);
   h.runtime.stop(); assert.equal(h.timers.size, 0);
 });
@@ -274,15 +272,15 @@ test('adding account defaults off, saved-config check does not save or overwrite
   h.runtime.stop();
 });
 
-test('selecting an IP management proxy saves its resolved first-layer URL', async () => {
+test('manual first-layer proxy address saves without unsupported host bridge calls', async () => {
   const h = uiHarness(); await settle();
-  assert.equal(h.get('upstream-proxy-id').children.length, 2);
-  h.get('upstream-proxy-id').value = '17';
+  const firstLayer = 'socks5://proxy-user:test-only@203.0.113.17:1081';
+  h.get('upstream-proxy-url').value = firstLayer;
   await h.get('config-form').fire('change');
   await h.get('save-config').click();
   assert.equal(h.calls.save.length, 1);
-  assert.equal(h.calls.save[0].upstream_proxy_id, 17);
-  assert.equal(h.calls.save[0].upstream_proxy_url, 'socks5://proxy-user:test-only@203.0.113.17:1081');
+  assert.equal(h.calls.save[0].upstream_proxy_id, 0);
+  assert.equal(h.calls.save[0].upstream_proxy_url, firstLayer);
   h.runtime.stop();
 });
 
@@ -293,7 +291,7 @@ test('explicit save button works without native form submission in sandbox', asy
   assert.equal(h.calls.save.length, 1);
   assert.equal(h.calls.save[0].enabled, false);
   assert.equal(h.calls.save[0].accounts[1].enabled, false);
-  assert.equal(h.calls.save[0].accounts[1].name, '账号十二');
+  assert.equal(h.calls.save[0].accounts[1].name, '');
   assert.equal(h.get('save-state').textContent, '已保存');
   assert.match(h.get('notice').textContent, /STATE Kit 已关闭/);
   h.runtime.stop();
@@ -317,7 +315,7 @@ test('detected account dropdown shows ID, name and email while model accepts pre
   const h = uiHarness(); await settle();
   const choices = h.get('new-account-id').children;
   assert.match(String(choices[1].textContent), /#7 · 示例账号 · owner@example\.com/);
-  assert.match(String(choices[2].textContent), /#12 · 账号十二 · account12@example\.com/);
+  assert.match(String(choices[2].textContent), /^#12$/);
   h.get('new-account-id').value = '7';
   await h.get('add-account').click();
   assert.match(h.get('notice').textContent, /已在列表中/);
