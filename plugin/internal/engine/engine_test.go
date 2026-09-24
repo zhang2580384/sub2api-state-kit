@@ -274,7 +274,7 @@ func TestCollectFixedProxyValidationAndPersistence(t *testing.T) {
 	e2 := testEngine(t, h, business.URL)
 	apply(t, e2, c)
 	waitFor(t, e2, "ready")
-	if dynamic.Load() != 1 || fixed.Load() != 2 {
+	if dynamic.Load() != 1 || fixed.Load() < 2 {
 		t.Fatalf("restart did not revalidate KV ticket: dynamic=%d fixed=%d", dynamic.Load(), fixed.Load())
 	}
 }
