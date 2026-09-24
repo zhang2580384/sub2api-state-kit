@@ -1,6 +1,6 @@
 # STATE Kit 插件使用指南
 
-适用于独立插件 `4.2.1` 和官方 Sub2API `v0.2.7`。插件不修改宿主源码，安装包为 `.s2plugin`。
+适用于独立插件 `4.3.0` 和官方 Sub2API `v0.2.8`。插件不修改宿主源码，安装包为 `.s2plugin`。
 
 ## 1. 先选运行方式
 
@@ -25,6 +25,16 @@
 - 代理生成器方式下，用于访问生成器 API；
 - Cookie 分流的业务固定代理留空时，也作为业务出口；
 - 固定 S5/HTTP 采集代理方式下，可作为前置代理。
+
+### 请求环境统一
+
+“统一请求环境日期、时区与语言”默认关闭。打开后，插件只修改请求里已经存在的字段：
+
+- `<environment_context>` 内的 `<current_date>` 和 `<timezone>`；
+- `type=user_location` 的 `timezone`；
+- 已有的 `Accept-Language`，统一为 `en-US,en;q=0.9`。
+
+默认请求时区是 `Asia/Singapore`。每个账号可在“账号资料”的“时区”栏覆盖。中国大陆、香港、澳门和台湾时区会被拒绝。该功能不添加原请求不存在的字段。
 
 稳定同出口需要：
 
@@ -75,7 +85,7 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 1. 从 Release 下载 `trusted-publisher.yaml`，把其中公钥合并到宿主现有 `config.yaml`，不要覆盖原配置。
 2. 重启一次 Sub2API，使公钥生效。
-3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.2.1_linux-amd64.s2plugin`；ARM64 使用对应包。
+3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.0_linux-amd64.s2plugin`；ARM64 使用对应包。
 4. 确认插件已签名、受信任、已启用，灰度 `100%`。
 5. 同类 OpenAI OAuth transport 插件只启用一个。
 
@@ -94,7 +104,7 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 ## 6. 速度与参数
 
-`4.2.1` 的速度优化：
+`4.3.0` 保留 `4.2.1` 的速度优化，并增加 HostService v2 暂停账号过滤和请求环境统一：
 
 - IP 与地区查询合并；
 - 同出口复验只复核 IP 是否变化，不重复查询地区；

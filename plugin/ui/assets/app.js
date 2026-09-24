@@ -9,6 +9,7 @@
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
     ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
     cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
+    request_rewrite_enabled: false, default_request_timezone: 'Asia/Singapore',
     ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
   const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '旧模式票据有效期'], refresh_before_seconds: [0, 3599, '旧模式提前续期'],
     proxy_generator_ttl_minutes: [1, 180, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
@@ -19,7 +20,10 @@
     ready: ['可用', 'success'], renewing: ['可用 · 续期中', 'success'], cooldown: ['冷却中', 'warning'],
     expired: ['已过期', 'warning'], error: ['获取失败', 'error'] });
   const MODEL_PATTERN = /^gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,94}$/;
-  const ACCOUNT_TEXT_LIMITS = Object.freeze({ name: 120, email: 254, expires_at: 64, quota: 80 });
+  const ACCOUNT_TEXT_LIMITS = Object.freeze({ name: 120, email: 254, expires_at: 64, quota: 80, request_timezone: 64 });
+  const RESTRICTED_TIMEZONES = new Set(['PRC', 'ROC', 'Hongkong', 'Asia/Chongqing', 'Asia/Chungking',
+    'Asia/Harbin', 'Asia/Kashgar', 'Asia/Macao', 'Asia/Taipei', 'Asia/Shanghai', 'Asia/Urumqi',
+    'Asia/Hong_Kong', 'Asia/Macau']);
   const ERRORS = Object.freeze({ attempts_exhausted: '本轮尝试已用完', identity_unavailable: '暂时无法取得账号授权或业务代理',
     invalid_dynamic_proxy: '动态代理配置无效', harvest_failed: '动态代理获取票据未成功', unexpected_state_length: '票据长度与所选套餐不符',
     identity_changed: '账号授权信息发生变化', account_egress_invalid: '账号出口代理配置无效',
@@ -108,6 +112,20 @@
       throw new Error('代理生成器须为不含认证信息或锚点的 HTTP(S) 地址。');
     }
   }
+  function validateTimezone(value, label) {
+    if (typeof value !== 'string') throw new Error(label + '格式不正确。');
+    const timezone = value.trim();
+    if (!timezone || Array.from(timezone).length > ACCOUNT_TEXT_LIMITS.request_timezone || /[\u0000-\u001f\u007f]/.test(timezone)) {
+      throw new Error(label + '过长或包含不支持的控制字符。');
+    }
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date());
+    } catch (_) {
+      throw new Error(label + '不是有效的 IANA 时区。');
+    }
+    if (RESTRICTED_TIMEZONES.has(timezone)) throw new Error(label + '不支持当前地区。');
+    return timezone;
+  }
   function normalizeBlockedCountries(value) {
     if (!Array.isArray(value) || value.length > 32) throw new Error('阻止国家或地区最多填写 32 个 ISO 两位代码。');
     const seen = new Set();
@@ -138,7 +156,8 @@
         email: accountText(account.email, 'email'), expires_at: accountText(account.expires_at, 'expires_at'),
         quota: accountText(account.quota, 'quota'), enabled: account.enabled === true,
         egress_mode: account.egress_mode || 'sub2', sticky_proxy_url: accountText(account.sticky_proxy_url, 'sticky_proxy_url'),
-        plan: account.plan || 'pro', models: Array.isArray(account.models) ? account.models.slice() : ['gpt-6-astra'] };
+        plan: account.plan || 'pro', request_timezone: accountText(account.request_timezone, 'request_timezone') || config.default_request_timezone,
+        models: Array.isArray(account.models) ? account.models.slice() : ['gpt-6-astra'] };
     }) : [];
     return config;
   }
@@ -153,6 +172,8 @@
     validateGeneratorURL(config.proxy_generator_url);
     config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
     if (typeof config.prefer_previous_ip !== 'boolean') throw new Error('上一轮可用出口复用开关格式不正确。');
+    if (typeof config.request_rewrite_enabled !== 'boolean') throw new Error('请求环境替换开关格式不正确。');
+    config.default_request_timezone = validateTimezone(config.default_request_timezone, '默认请求时区');
     if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('运行方式须选择稳定同出口或 Cookie 分流。');
     if (!['generator', 'socks5'].includes(config.cookie_capture_mode)) throw new Error('Cookie 模式打票方式须选择代理生成器或 S5/HTTP 固定代理。');
     if (typeof config.standby_ticket_enabled !== 'boolean') throw new Error('备用票队列开关格式不正确。');
@@ -188,6 +209,7 @@
         if (/\{(?:random|sid)\}/i.test(account.sticky_proxy_url)) throw new Error('账号粘性代理必须使用服务商固定 session，不能使用 {random} 或 {sid}。');
       }
       if (!['pro', 'team'].includes(account.plan)) throw new Error('请选择 Pro 或 Team 套餐。');
+      account.request_timezone = validateTimezone(account.request_timezone || config.default_request_timezone, '账号请求时区');
       if (!Array.isArray(account.models) || !account.models.length || account.models.length > 16) throw new Error('每个账号须填写 1–16 个模型。');
       totalModels += account.models.length;
       const models = new Set();
@@ -369,7 +391,8 @@
           ['名称', 'name', '账号名称'],
           ['邮箱', 'email', '账号邮箱'],
           ['到期', 'expires_at', '例如 2026-12-31 23:59'],
-          ['额度', 'quota', '例如 $12.50 / $20.00']
+          ['额度', 'quota', '例如 $12.50 / $20.00'],
+          ['时区', 'request_timezone', 'Asia/Singapore']
         ].forEach(function (entry) {
           const field = element('label', undefined, 'metadata-field');
           field.appendChild(element('span', entry[0], 'metadata-label'));
@@ -533,6 +556,8 @@
       byID('proxy-generator-url').value = config.proxy_generator_url;
       byID('proxy-generator-blocked-countries').value = config.proxy_generator_blocked_countries.join(', ');
       byID('prefer-previous-ip').checked = config.prefer_previous_ip === true;
+      byID('request-rewrite-enabled').checked = config.request_rewrite_enabled === true;
+      byID('default-request-timezone').value = config.default_request_timezone;
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
       accounts = config.accounts.map(mergeHostAccountMetadata);
       renderAccounts();
@@ -561,7 +586,9 @@
         standby_ticket_enabled: byID('standby-ticket-enabled').checked,
         proxy_generator_url: byID('proxy-generator-url').value.trim(),
         proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean),
-        prefer_previous_ip: byID('prefer-previous-ip').checked
+        prefer_previous_ip: byID('prefer-previous-ip').checked,
+        request_rewrite_enabled: byID('request-rewrite-enabled').checked,
+        default_request_timezone: byID('default-request-timezone').value.trim()
       };
       Object.keys(numberIDs).forEach(function (key) {
         const raw = byID(numberIDs[key]).value.trim();
@@ -571,7 +598,7 @@
         account_id: account.account_id, name: accountText(account.name, 'name'), email: accountText(account.email, 'email'),
         expires_at: accountText(account.expires_at, 'expires_at'), quota: accountText(account.quota, 'quota'),
         enabled: account.enabled, egress_mode: account.egress_mode, sticky_proxy_url: account.sticky_proxy_url,
-        plan: account.plan, models: account.models.slice()
+        plan: account.plan, request_timezone: accountText(account.request_timezone, 'request_timezone'), models: account.models.slice()
       }; });
       return validateConfig(config);
     }
@@ -692,7 +719,9 @@
       if (accounts.length >= 256) { notice('最多配置 256 个账号。', 'error'); return; }
       const metadata = accountMetadataByID(id);
       accounts.push({ account_id: id, name: metadata.name, email: metadata.email, expires_at: metadata.expires_at,
-        quota: metadata.quota, enabled: false, egress_mode: 'sub2', sticky_proxy_url: '', plan: 'pro', models: ['gpt-6-astra'] });
+        quota: metadata.quota, enabled: false, egress_mode: 'sub2', sticky_proxy_url: '', plan: 'pro',
+        request_timezone: byID('default-request-timezone').value.trim() || DEFAULT_CONFIG.default_request_timezone,
+        models: ['gpt-6-astra'] });
       renderAccounts(); markDirty(); byID('new-account-id').value = ''; byID('manual-account-id').value = '';
       notice('已添加账号 ' + id + '，默认关闭。补全账号资料、选择套餐和模型后，可手动开启并保存。');
     });
@@ -809,6 +838,7 @@
     return { stop: stop, refreshStatus: refreshStatus };
   }
   return { DEFAULT_CONFIG: DEFAULT_CONFIG, normalizeConfig: normalizeConfig, validateConfig: validateConfig,
+    validateTimezone: validateTimezone,
     accountID: accountID, accountOptionLabel: accountOptionLabel, normalizeAccountCatalog: normalizeAccountCatalog,
     parseStatus: parseStatus, stateLabel: stateLabel, errorLabel: errorLabel, redactError: redactError, remainingText: remainingText,
     diagnosticStageLabel: diagnosticStageLabel, diagnosticOutcomeLabel: diagnosticOutcomeLabel, start: start };

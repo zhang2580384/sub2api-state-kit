@@ -34,6 +34,7 @@ type Engine struct {
 	hostConn         *grpc.ClientConn
 	hostReady        bool
 	directory        map[int64]bool
+	schedulable      map[int64]bool
 	directoryAt      time.Time
 	directoryError   string
 	tickets          map[string]*ticket
@@ -140,7 +141,8 @@ func newEngine(host pluginv1.HostServiceClient, probeURL string, tick time.Durat
 	e := &Engine{
 		config: DefaultConfig(), ctx: ctx, cancel: cancel, generationCtx: gc, generationCancel: gcancel,
 		wake: make(chan struct{}, 1), done: make(chan struct{}), host: host, hostReady: host != nil,
-		directory: map[int64]bool{}, tickets: map[string]*ticket{}, standbyTickets: map[string]*ticket{}, records: map[string]*jobRecord{},
+		directory: map[int64]bool{}, schedulable: map[int64]bool{},
+		tickets: map[string]*ticket{}, standbyTickets: map[string]*ticket{}, records: map[string]*jobRecord{},
 		previous: map[int64]previousEgress{}, jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4),
 		clients: newClientPool(), probeURL: probeURL, egressURL: "https://api.ipify.org?format=json",
 		geoURLs: []string{
@@ -173,7 +175,7 @@ func (e *Engine) Close() {
 }
 func (e *Engine) SetHostBroker(b *hcplugin.GRPCBroker) { e.mu.Lock(); e.broker = b; e.mu.Unlock() }
 func (e *Engine) InitHostServices(ctx context.Context, r *pluginv1.InitHostServicesRequest) (*pluginv1.InitHostServicesResponse, error) {
-	if r == nil || r.HostServiceApiVersion != pluginv1.HostServiceAPIVersion {
+	if r == nil || r.HostServiceApiVersion < 1 || r.HostServiceApiVersion > pluginv1.HostServiceAPIVersion {
 		return &pluginv1.InitHostServicesResponse{Message: "unsupported host service API"}, nil
 	}
 	e.mu.Lock()

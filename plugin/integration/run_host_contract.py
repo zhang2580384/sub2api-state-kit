@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test our signed package using an existing stock Sub2API v0.2.7 checkout.
+"""Test our signed package using an existing stock Sub2API v0.2.8 checkout.
 
 No git mutations, host downloads, or host service deployment are performed. Go may download
 missing module dependencies through its normal module cache. The package must
@@ -7,7 +7,7 @@ contain a runtime for this machine. All upstream requests use localhost fixtures
 
 Example:
   python3 plugin/integration/run_host_contract.py \
-    --host-src /path/to/sub2api-v0.2.7 \
+    --host-src /path/to/sub2api-v0.2.8 \
     --package /path/to/state-kit.s2plugin \
     --public-key /path/to/publisher-public-key.txt \
     --log /path/to/host-contract.log
@@ -41,7 +41,7 @@ def main() -> int:
     service = host / "backend" / "internal" / "service"
     target = service / "state_kit_external_plugin_test.go"
     if not (service / "plugin_host_services.go").is_file():
-        parser.error("--host-src must point to stock Sub2API v0.2.7 with HostService support")
+        parser.error("--host-src must point to stock Sub2API v0.2.8 with HostService support")
     if not package.is_file():
         parser.error("--package does not exist")
     if target.exists():
@@ -72,7 +72,7 @@ def main() -> int:
             "Running real stock-host installer and plugin process tests; localhost upstreams only.",
             f"Package SHA256: {hashlib.sha256(package.read_bytes()).hexdigest()}",
             f"Platform: {platform.system()} {platform.machine()}",
-            "Host compatibility: Sub2API 0.2.7; publisher key ID: state-kit-local-v1",
+            "Host compatibility: Sub2API 0.2.8; publisher key ID: state-kit-local-v1",
         ]
         if (host / ".git").exists():
             revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=host,

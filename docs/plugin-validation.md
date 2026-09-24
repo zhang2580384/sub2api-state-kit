@@ -1,22 +1,21 @@
 # 插件版验证记录
 
-对象：STATE Kit 独立插件 `4.2.1`，宿主基线为官方 Sub2API `v0.2.7`。
+对象：STATE Kit 独立插件 `4.3.0`，宿主基线为官方 Sub2API `v0.2.8`。
 
 ## 自动化验证
 
-2026-09-22 执行：
+2026-09-24 执行：
 
 - `go test ./... -count=1`：通过。
+- `CGO_ENABLED=1 go test -race ./... -count=1`：通过，使用官方要求的 Go `1.27.0`。
 - `go vet ./...`：通过。
-- `node --test ui-tests/*.test.cjs`：30 项通过。
+- `node --test ui-tests/*.test.cjs`：32 项通过。
 - `node --check ui/assets/app.js`：通过。
 - `node --check ui/assets/bridge-v1.js`：通过。
 - Python 打包脚本语法检查：通过。
 - Linux amd64、Linux arm64、macOS arm64 交叉编译：通过。
-- Linux amd64 包验签通过；payload `7` 个，runtime platform 为 `linux-amd64`。
-- Linux arm64 包验签通过；payload `7` 个，runtime platform 为 `linux-arm64`。
-- 全平台包验签通过；payload `9` 个，runtime platforms 为 `linux-amd64`、`linux-arm64`、`darwin-arm64`。
-- 当前本地环境没有 CGO，因此本轮未执行 `go test -race`；普通 Go 测试和 `go vet` 已通过。
+- 单包包含三个平台 runtime；Ed25519 签名和 manifest 哈希验签通过，payload `9` 个，runtime platforms 为 `linux-amd64`、`linux-arm64`、`darwin-arm64`。
+- 官方 Sub2API `v0.2.8`（提交 `fd80b08c90b55edcad5b00171b53f08721d30da1`）宿主契约测试：通过；覆盖签名安装、不受信发布者拒绝、payload/签名篡改拒绝、插件进程握手、HostService 反向 gRPC、账号目录与 KV、二进制正文、SSE 流式转发、请求取消、配置校验、受限 localhost 代理失败边界和杀进程重启。
 
 测试覆盖：
 
@@ -30,9 +29,11 @@
 - 旧模式备用票复用当前生成出口，准备期间不替换仍有效的主票；
 - 备用票晋级前的业务出口指纹和账号身份指纹检查；
 - 上一轮生成器出口复用、地区过滤、持久化恢复和异常守护；
+- HostService v2 中 `schedulable=false` 的账号不会进入获取队列；
+- 请求环境替换只修改已有字段，账号级时区覆盖和受限时区拒绝符合预期；
 - UI 模式切换、字段校验、保存、状态显示和诊断脱敏。
 
-### 4.2.1 获取链路优化
+### 4.3.0 保留的获取链路优化
 
 - 生成出口的 IP 与地区合并为一次查询；
 - 同出口复验只复核 IP 是否变化，不重复查询地区；
@@ -116,7 +117,7 @@ sessType=sticky&sessTime=180
 
 ## 未完成项
 
-- 尚未把 `4.2.1` 部署回线上 Sub2API 实例执行升级和回退验收。
+- 尚未把 `4.3.0` 部署回线上 Sub2API 实例执行升级和回退验收。
 - 粘性出口长测已观察到 `87.91` 分钟未换 IP，但尚未完整运行到 180 分钟。
 - Cookie 分流跨出口已有连续 `4/4` 实测，仍需更多账号、地区和长时间样本。
 - 单张 292 尚未观察到持续 10 分钟以上的本轮样本，因此不宣称上游 292 能保持 180 分钟。

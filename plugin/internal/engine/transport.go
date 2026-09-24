@@ -279,26 +279,39 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	var pipe *io.PipeReader
 	var ticket *receipt
 	var model string
-	if e.accountEnabled(start) {
+	var bufferedBodyLength int64
+	bufferedBody := false
+	rewriteRequested, requestTimezone := e.requestRewriteSettings(start)
+	ticketAccount := e.accountEnabled(start)
+	if ticketAccount || (rewriteRequested && start.HasBody) {
 		data, readErr := readConfiguredBody(ctx, stream, start.HasBody)
 		if readErr != nil {
 			return sendTicketUnavailable(stream)
 		}
-		var request struct {
-			Model string `json:"model"`
+		if ticketAccount {
+			var request struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(data, &request) != nil || strings.TrimSpace(request.Model) == "" {
+				return sendTicketUnavailable(stream)
+			}
+			model = request.Model
+			ticket, err = e.ticketForRequest(ctx, start, model)
+			if err != nil {
+				e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "ticket_lookup",
+					TargetProxy: start.ProxyUrl, Outcome: "unavailable", Error: "state_ticket_unavailable"})
+				return sendTicketUnavailable(stream)
+			}
 		}
-		if json.Unmarshal(data, &request) != nil || strings.TrimSpace(request.Model) == "" {
-			return sendTicketUnavailable(stream)
-		}
-		model = request.Model
-		ticket, err = e.ticketForRequest(ctx, start, model)
-		if err != nil {
-			e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "ticket_lookup",
-				TargetProxy: start.ProxyUrl, Outcome: "unavailable", Error: "state_ticket_unavailable"})
-			return sendTicketUnavailable(stream)
+		if rewriteRequested {
+			if rewritten, changed := rewriteRequestData(data, requestTimezone, time.Now()); changed {
+				data = rewritten
+			}
 		}
 		if start.HasBody {
 			body = bytes.NewReader(data)
+			bufferedBodyLength = int64(len(data))
+			bufferedBody = true
 		}
 	} else if start.HasBody {
 		var writer *io.PipeWriter
@@ -320,7 +333,13 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	if start.Host != "" {
 		req.Host = start.Host
 	}
+	if rewriteRequested {
+		rewriteAcceptLanguage(req.Header)
+	}
 	req.ContentLength = start.ContentLength
+	if bufferedBody {
+		req.ContentLength = bufferedBodyLength
+	}
 	// Do not make a buffered business POST eligible for transport-level replay.
 	req.GetBody = nil
 	if !start.HasBody {

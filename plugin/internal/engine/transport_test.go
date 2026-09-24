@@ -149,6 +149,49 @@ func TestForwardPreservesHeadersAndRawResponse(t *testing.T) {
 	}
 }
 
+func TestForwardRewritesRequestEnvironmentAndLanguage(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedDate := time.Now().In(loc).Format("2006-01-02")
+	requestBody := []byte(`{"input":[{"content":"<environment_context><current_date>2000-01-01</current_date><timezone>America/Los_Angeles</timezone></environment_context>"},{"type":"user_location","timezone":"America/Los_Angeles"}]}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Errorf("read: %v", readErr)
+		}
+		text := string(body)
+		if r.ContentLength != int64(len(body)) {
+			t.Errorf("content length = %d, want %d", r.ContentLength, len(body))
+		}
+		if !strings.Contains(text, "<current_date>"+expectedDate+"</current_date>") ||
+			!strings.Contains(text, "<timezone>Asia/Tokyo</timezone>") ||
+			!strings.Contains(text, `"timezone":"Asia/Tokyo"`) {
+			t.Errorf("request environment was not rewritten: %s", text)
+		}
+		if got := r.Header.Values("Accept-Language"); len(got) != 1 || got[0] != defaultAcceptLanguage {
+			t.Errorf("Accept-Language = %v", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	start := mockStart(server.URL, true, int64(len(requestBody)))
+	start.Headers["Accept-Language"] = &pluginv1.HeaderValues{Values: []string{"zh-CN"}}
+	s := fixedStream(start, requestBody)
+	e := forwardingEngine(t, false)
+	e.config.RequestRewriteEnabled = true
+	e.config.DefaultRequestTimezone = defaultRequestTimezone
+	e.config.Accounts[0].RequestTimezone = "Asia/Tokyo"
+	if err := e.Forward(s); err != nil {
+		t.Fatal(err)
+	}
+	frames := s.frames()
+	if len(frames) == 0 || frames[0].GetStart().StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected response: %v", frames)
+	}
+}
+
 func TestForwardStreamsRequestAndResponseBeforeCompletion(t *testing.T) {
 	firstSeen := make(chan struct{})
 	releaseResponse := make(chan struct{})

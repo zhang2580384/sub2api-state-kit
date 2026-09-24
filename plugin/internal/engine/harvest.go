@@ -54,16 +54,31 @@ func (e *Engine) refreshDirectory() {
 	e.directoryAt = time.Now()
 	if err != nil || res == nil {
 		e.directory = map[int64]bool{}
+		e.schedulable = map[int64]bool{}
 		e.directoryError = "host account directory unavailable"
 		return
 	}
 	d := map[int64]bool{}
-	for _, id := range res.AccountIds {
-		if id > 0 {
-			d[id] = true
+	s := map[int64]bool{}
+	if len(res.Accounts) > 0 {
+		for _, account := range res.Accounts {
+			if account == nil || account.Id <= 0 {
+				continue
+			}
+			d[account.Id] = true
+			s[account.Id] = account.Schedulable
+		}
+	} else {
+		// HostService v1 only exposes IDs, so preserve its previous behavior.
+		for _, id := range res.AccountIds {
+			if id > 0 {
+				d[id] = true
+				s[id] = true
+			}
 		}
 	}
 	e.directory = d
+	e.schedulable = s
 	e.directoryError = ""
 }
 func (e *Engine) schedule() {
@@ -74,7 +89,7 @@ func (e *Engine) schedule() {
 	}
 	now := time.Now()
 	for _, a := range e.config.Accounts {
-		if !a.Enabled || !e.directory[a.AccountID] {
+		if !a.Enabled || !e.directory[a.AccountID] || !e.schedulable[a.AccountID] {
 			continue
 		}
 		for _, model := range a.Models {

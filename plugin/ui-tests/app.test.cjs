@@ -20,7 +20,21 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({}).cookie_capture_mode, 'generator');
   assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 300);
   assert.equal(ui.normalizeConfig({}).standby_lead_seconds, 90);
+  assert.equal(ui.normalizeConfig({}).request_rewrite_enabled, false);
+  assert.equal(ui.normalizeConfig({}).default_request_timezone, 'Asia/Singapore');
   assert.equal(ui.validateConfig(configured()).enabled, false);
+});
+
+test('request timezone rewrite validates account overrides and restricted regions', () => {
+  const config = configured({ request_rewrite_enabled: true, default_request_timezone: 'Asia/Singapore' });
+  assert.equal(ui.validateConfig(config).request_rewrite_enabled, true);
+  config.default_request_timezone = 'Asia/Hong_Kong';
+  assert.throws(() => ui.validateConfig(config), /不支持当前地区/);
+  config.default_request_timezone = 'Asia/Singapore';
+  config.accounts[0].request_timezone = 'America/Los_Angeles';
+  assert.equal(ui.validateConfig(config).accounts[0].request_timezone, 'America/Los_Angeles');
+  config.accounts[0].request_timezone = 'Asia/Taipei';
+  assert.throws(() => ui.validateConfig(config), /不支持当前地区/);
 });
 
 test('requires dynamic proxy only when global and account switches are both on', () => {
@@ -353,6 +367,20 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   assert.equal(h.calls.save[0].prefer_previous_ip, true);
   assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
   assert.equal(h.calls.save[0].refresh_before_seconds, 30);
+  h.runtime.stop();
+});
+
+test('request rewrite switch, default timezone and account timezone are persisted', async () => {
+  const h = uiHarness(); await settle();
+  h.get('request-rewrite-enabled').checked = true;
+  h.get('default-request-timezone').value = 'Asia/Singapore';
+  const timezone = h.get('accounts-body').children[0].children[1].children[0].children[4].children[1];
+  timezone.value = 'Asia/Tokyo';
+  await timezone.fire('input');
+  await h.get('save-config').click();
+  assert.equal(h.calls.save[0].request_rewrite_enabled, true);
+  assert.equal(h.calls.save[0].default_request_timezone, 'Asia/Singapore');
+  assert.equal(h.calls.save[0].accounts[0].request_timezone, 'Asia/Tokyo');
   h.runtime.stop();
 });
 

@@ -13,12 +13,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.2.1"
+const Version = "4.3.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
+
+const (
+	defaultRequestTimezone = "Asia/Singapore"
+	defaultAcceptLanguage  = "en-US,en;q=0.9"
+)
 
 const (
 	egressModeSub2      = "sub2"
@@ -53,6 +59,8 @@ type Config struct {
 	CookieTicketTTLSeconds         int      `json:"cookie_ticket_ttl_seconds"`
 	StandbyTicketEnabled           bool     `json:"standby_ticket_enabled"`
 	StandbyLeadSeconds             int      `json:"standby_lead_seconds"`
+	RequestRewriteEnabled          bool     `json:"request_rewrite_enabled"`
+	DefaultRequestTimezone         string   `json:"default_request_timezone"`
 	// DiagnosticLogEnabled is retained only so configurations saved by v0.3.6
 	// remain loadable. Diagnostics are now a UI-scoped live listener and the
 	// value is intentionally ignored.
@@ -66,16 +74,17 @@ type Config struct {
 	Accounts               []AccountConfig `json:"accounts"`
 }
 type AccountConfig struct {
-	AccountID      int64    `json:"account_id"`
-	Name           string   `json:"name,omitempty"`
-	Email          string   `json:"email,omitempty"`
-	ExpiresAt      string   `json:"expires_at,omitempty"`
-	Quota          string   `json:"quota,omitempty"`
-	Enabled        bool     `json:"enabled"`
-	EgressMode     string   `json:"egress_mode"`
-	StickyProxyURL string   `json:"sticky_proxy_url,omitempty"`
-	Plan           string   `json:"plan"`
-	Models         []string `json:"models"`
+	AccountID       int64    `json:"account_id"`
+	Name            string   `json:"name,omitempty"`
+	Email           string   `json:"email,omitempty"`
+	ExpiresAt       string   `json:"expires_at,omitempty"`
+	Quota           string   `json:"quota,omitempty"`
+	Enabled         bool     `json:"enabled"`
+	EgressMode      string   `json:"egress_mode"`
+	StickyProxyURL  string   `json:"sticky_proxy_url,omitempty"`
+	Plan            string   `json:"plan"`
+	RequestTimezone string   `json:"request_timezone,omitempty"`
+	Models          []string `json:"models"`
 }
 
 func DefaultConfig() Config {
@@ -91,6 +100,7 @@ func DefaultConfig() Config {
 		CookieCaptureMode:              captureModeGenerator,
 		CookieTicketTTLSeconds:         300,
 		StandbyLeadSeconds:             90,
+		DefaultRequestTimezone:         defaultRequestTimezone,
 		Accounts:                       []AccountConfig{},
 	}
 }
@@ -141,6 +151,10 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	c.CookieCaptureProxyURL = strings.TrimSpace(c.CookieCaptureProxyURL)
 	c.CookieBusinessProxyURL = strings.TrimSpace(c.CookieBusinessProxyURL)
+	c.DefaultRequestTimezone = strings.TrimSpace(c.DefaultRequestTimezone)
+	if c.DefaultRequestTimezone == "" {
+		c.DefaultRequestTimezone = defaultRequestTimezone
+	}
 	if c.UpstreamProxyID < 0 {
 		return c, errors.New("upstream_proxy_id must be nonnegative")
 	}
@@ -173,6 +187,9 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	if c.StandbyLeadSeconds < 10 || c.StandbyLeadSeconds > 600 {
 		return c, errors.New("standby_lead_seconds must be 10..600")
+	}
+	if err := validateRequestTimezone(c.DefaultRequestTimezone); err != nil {
+		return c, err
 	}
 	if c.TicketMode == ticketModeCookie && c.StandbyLeadSeconds >= c.CookieTicketTTLSeconds {
 		return c, errors.New("standby_lead_seconds must be less than cookie_ticket_ttl_seconds")
@@ -249,6 +266,13 @@ func ParseConfig(raw []byte) (Config, error) {
 		}
 		if a.Plan != "pro" && a.Plan != "team" {
 			return c, errors.New("plan must be pro or team")
+		}
+		a.RequestTimezone = strings.TrimSpace(a.RequestTimezone)
+		if a.RequestTimezone == "" {
+			a.RequestTimezone = c.DefaultRequestTimezone
+		}
+		if err := validateRequestTimezone(a.RequestTimezone); err != nil {
+			return c, errors.New("account request_timezone is invalid or restricted")
 		}
 		if a.Models == nil {
 			a.Models = []string{"gpt-6-astra"}
@@ -382,6 +406,36 @@ func validateProxy(raw string) error {
 	return nil
 }
 
+func validateRequestTimezone(raw string) error {
+	if raw == "" || len(raw) > 64 || hasControlChars(raw) {
+		return errors.New("request timezone is invalid")
+	}
+	loc, err := time.LoadLocation(raw)
+	if err != nil {
+		return errors.New("request timezone is not a valid IANA timezone")
+	}
+	switch strings.ToLower(raw) {
+	case "prc", "roc", "hongkong", "asia/chongqing", "asia/chungking",
+		"asia/harbin", "asia/kashgar", "asia/macao", "asia/taipei",
+		"asia/shanghai", "asia/urumqi", "asia/hong_kong", "asia/macau":
+		return errors.New("request timezone is restricted")
+	}
+	switch loc.String() {
+	case "Asia/Shanghai", "Asia/Urumqi", "Asia/Hong_Kong", "Asia/Macau", "Asia/Taipei":
+		return errors.New("request timezone is restricted")
+	}
+	return nil
+}
+
+func hasControlChars(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func validateProxyGeneratorURL(raw string) error {
 	if raw == "" {
 		return nil
@@ -407,16 +461,18 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v5", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+	return digest("v6", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
 		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
 		c.TicketMode, c.CookieCaptureMode, c.CookieCaptureProxyURL, c.CookieBusinessProxyURL,
 		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),
+		strconv.FormatBool(c.RequestRewriteEnabled), c.DefaultRequestTimezone,
 		a.Plan, model, jsonText(struct {
 			ID             int64
 			TTL            int
 			EgressMode     string
 			StickyProxyURL string
-		}{a.AccountID, c.TTLMinutes, a.EgressMode, a.StickyProxyURL}))
+			Timezone       string
+		}{a.AccountID, c.TTLMinutes, a.EgressMode, a.StickyProxyURL, a.RequestTimezone}))
 }
 func effectiveTicketTTL(c Config, a AccountConfig) time.Duration {
 	if c.TicketMode == ticketModeCookie {

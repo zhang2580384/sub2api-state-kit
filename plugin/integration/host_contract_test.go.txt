@@ -1,6 +1,6 @@
 //go:build statekit_host_contract
 
-// This file is copied temporarily into the official v0.2.7 host's service package
+// This file is copied temporarily into the official v0.2.8 host's service package
 // by run_host_contract.py. It is not a patch to the host and is excluded from the
 // plugin module's normal tests. All identities and upstreams below are synthetic.
 package service
@@ -45,16 +45,25 @@ func (s *stateKitContractKV) Get(ctx context.Context, pluginKey, namespace, key 
 	return s.PluginKVStore.Get(ctx, pluginKey, namespace, key)
 }
 
-func (d *stateKitContractDirectory) ListPluginAccounts(_ context.Context, platform, accountType string) ([]int64, error) {
+func (d *stateKitContractDirectory) ListPluginAccounts(_ context.Context, scope PluginAccountScope, platform, accountType string) ([]PluginAccountInfo, error) {
 	d.lists.Add(1)
+	if !scope.Contains(PlatformOpenAI, AccountTypeOAuth) {
+		return nil, nil
+	}
 	if (platform != "" && platform != PlatformOpenAI) || (accountType != "" && accountType != AccountTypeOAuth) {
 		return nil, nil
 	}
-	return []int64{42, 84}, nil
+	return []PluginAccountInfo{
+		{ID: 42, Platform: PlatformOpenAI, AccountType: AccountTypeOAuth, Schedulable: true},
+		{ID: 84, Platform: PlatformOpenAI, AccountType: AccountTypeOAuth, Schedulable: true},
+	}, nil
 }
 
-func (d *stateKitContractDirectory) ResolvePluginOutboundIdentity(_ context.Context, id int64) (*PluginOutboundIdentity, error) {
+func (d *stateKitContractDirectory) ResolvePluginOutboundIdentity(_ context.Context, scope PluginAccountScope, id int64) (*PluginOutboundIdentity, error) {
 	d.resolves.Add(1)
+	if !scope.Contains(PlatformOpenAI, AccountTypeOAuth) {
+		return nil, nil
+	}
 	if id != 42 && id != 84 {
 		return nil, nil
 	}
@@ -88,7 +97,7 @@ func stateKitContractInstaller(t *testing.T, publicKey string) *PluginPackageIns
 	if publicKey != "" {
 		cfg.Plugins.TrustedPublishers[stateKitContractKeyID] = publicKey
 	}
-	return NewPluginPackageInstaller(cfg, PluginHostInfo{Version: "0.2.7", BuildType: "release"})
+	return NewPluginPackageInstaller(cfg, PluginHostInfo{Version: "0.2.8", BuildType: "release"})
 }
 
 func stateKitContractRewriteZIP(t *testing.T, raw []byte, filename string, edit func([]byte) []byte) []byte {
@@ -125,7 +134,7 @@ func TestStateKitOfficialHostPackageTrust(t *testing.T) {
 		got, err := stateKitContractInstaller(t, key).Install(context.Background(), bytes.NewReader(raw), nil)
 		require.NoError(t, err)
 		assert.Equal(t, stateKitContractPluginID, got.PluginKey)
-		assert.Equal(t, "4.2.1", got.Version)
+		assert.Equal(t, "4.3.0", got.Version)
 		assert.Equal(t, PluginSignatureTrusted, got.SignatureStatus)
 		assert.Equal(t, PluginStateDisabled, got.State)
 		assert.True(t, got.Compatibility.Compatible)
@@ -187,7 +196,10 @@ func TestStateKitOfficialHostRuntime(t *testing.T) {
 	require.NoError(t, err)
 	directory := &stateKitContractDirectory{}
 	store := &stateKitContractKV{PluginKVStore: newFakePluginKVStore()}
-	host := newPluginHostServiceServer(stateKitContractPluginID, store, directory)
+	scope := newPluginAccountScope(pluginAccountScopeEntry{
+		Platform: PlatformOpenAI, AccountType: AccountTypeOAuth,
+	})
+	host := newPluginHostServiceServer(stateKitContractPluginID, store, directory, scope)
 	runtime := stateKitContractStart(t, installation, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -196,6 +208,8 @@ func TestStateKitOfficialHostRuntime(t *testing.T) {
 	var defaults map[string]any
 	require.NoError(t, json.Unmarshal(normalized, &defaults))
 	assert.Equal(t, false, defaults["enabled"], "fresh plugin must not enable STATE")
+	assert.Equal(t, false, defaults["request_rewrite_enabled"], "request rewrite must default off")
+	assert.Equal(t, "Asia/Singapore", defaults["default_request_timezone"])
 	assert.Empty(t, defaults["accounts"], "fresh plugin must not opt accounts in")
 	health, err := runtime.status(ctx)
 	require.NoError(t, err)
@@ -369,5 +383,5 @@ func TestStateKitOfficialHostRuntime(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, health.Healthy)
 	})
-	t.Log("Verified signed package on stock Sub2API 0.2.7: installer, process handshake, account/KV broker, default-off transport, binary body, SSE streaming/cancellation, config validation, bounded localhost-proxy failure, kill/restart. No real account or provider traffic.")
+	t.Log("Verified signed package on stock Sub2API 0.2.8: installer, process handshake, account/KV broker, default-off transport, binary body, SSE streaming/cancellation, config validation, bounded localhost-proxy failure, kill/restart. No real account or provider traffic.")
 }

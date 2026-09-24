@@ -1,6 +1,6 @@
 # Sub2API STATE Kit 插件
 
-本仓库维护 Sub2API `v0.2.7` 的独立 `.s2plugin` 插件，不覆盖宿主源码。`4.2.1` 简化了配置页，并缩短票据续期链路。
+本仓库维护 Sub2API `v0.2.8` 的独立 `.s2plugin` 插件，不覆盖宿主源码。`4.3.0` 在保留现有票据、Cookie 分流、代理生成器和备用票能力的基础上，增加 HostService v2 暂停账号过滤，以及请求日期、时区和语言统一。
 
 ## 最短配置
 
@@ -12,6 +12,17 @@
 | Cookie 分流 | 打票和业务必须使用不同出口 | 通过 `state + Cookie + session_id` 维持会话 |
 
 第一层“IP 管理代理”两种方式共用，始终显示。它用于访问代理生成器 API；Cookie 分流的业务固定代理留空时，也作为业务出口。
+
+## 请求环境统一
+
+配置页新增“统一请求环境日期、时区与语言”开关，默认关闭。打开后：
+
+- 请求里已经存在的 `<current_date>`、`<timezone>` 和 `user_location.timezone` 会按账号时区统一；
+- 已经存在的 `Accept-Language` 会替换为 `en-US,en;q=0.9`；
+- 默认时区为 `Asia/Singapore`，每个账号可以单独覆盖；
+- 中国大陆、香港、澳门和台湾时区会被拒绝。
+
+请求头或正文里原本没有这些字段时，插件不会凭空添加。
 
 ## 稳定同出口配置
 
@@ -61,6 +72,13 @@
 
 因此多出的是“同出口复验”，不是无效查票。续期或备用票获取期间，当前仍可用的旧票继续服务。
 
+## 4.3.0 新增内容
+
+- 同步官方 Sub2API `v0.2.8` 的 HostService v2 契约；
+- 根据宿主返回的 `schedulable` 跳过暂停、限流、过载或额度不可调度的账号；
+- 新增全局请求环境替换开关、默认时区和账号级时区；
+- 保留 `v4.2.1` 的 Cookie 分流、备用票、生成器复用和地区过滤逻辑。
+
 ## 4.2.1 续期优化
 
 - 将出口 IP 与地区检查合并为一次请求。
@@ -98,7 +116,7 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 下载对应架构的包：
 
 ```text
-sub2api-state-kit_plugin_v4.2.1_linux-amd64.s2plugin
+sub2api-state-kit_plugin_v4.3.0_linux-amd64.s2plugin
 ```
 
 首次安装先把 Release 中的 `trusted-publisher.yaml` 合并到宿主现有 `config.yaml`，重启一次 Sub2API，再上传同架构 `.s2plugin`。已安装旧版时可以直接升级，配置会保留。

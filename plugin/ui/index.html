@@ -35,6 +35,14 @@
           <label for="upstream-proxy-id">第一层：IP 管理代理（两种方式共用）</label>
           <select id="upstream-proxy-id"><option value="0">不使用第一层</option></select>
           <p id="upstream-proxy-help" class="help">用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。</p>
+          <div class="inline-switch"><label class="switch-label" for="request-rewrite-enabled"><input id="request-rewrite-enabled" type="checkbox" role="switch"><span>统一请求环境日期、时区与语言</span></label></div>
+          <label for="default-request-timezone">默认请求时区</label>
+          <input id="default-request-timezone" type="text" list="timezone-options" autocomplete="off" spellcheck="false" placeholder="Asia/Singapore">
+          <datalist id="timezone-options">
+            <option value="Asia/Singapore"></option><option value="Asia/Tokyo"></option><option value="Asia/Seoul"></option>
+            <option value="America/Los_Angeles"></option><option value="America/New_York"></option><option value="Europe/London"></option>
+          </datalist>
+          <p class="help">仅替换请求里已经存在的日期、时区、<code>user_location.timezone</code> 和 <code>Accept-Language</code>；账号级时区留空时使用此默认值。香港、澳门、台湾和中国大陆时区不可用。</p>
           <div id="legacy-mode-fields">
             <label for="dynamic-proxy-url">第二层：Sub2 原有动态代理</label>
             <div class="input-action"><input id="dynamic-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="填写动态代理地址"><button id="toggle-proxy" type="button" class="secondary" aria-controls="dynamic-proxy-url" aria-pressed="false">显示</button></div>

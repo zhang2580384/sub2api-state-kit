@@ -4,7 +4,7 @@ This repository includes modifications to and public plugin protocol files from
 Wei-Shaw/sub2api, distributed under LGPL-3.0. See LICENSE.
 
 Source overlay baseline: v0.2.6, 49a39b6dc1abed30fd227611e8af1108bc427610.
-Plugin protocol baseline: v0.2.7, aea725f2ea644d5592d0bbb1d63b607efa7e200a.
+Plugin protocol baseline: v0.2.8, fd80b08c90b55edcad5b00171b53f08721d30da1.
 The plugin protocol sources in plugin/internal/pluginapi/v1 are retained for
 standalone, reproducible builds. Import paths are adapted to this module.
 

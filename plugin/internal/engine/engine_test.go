@@ -20,13 +20,15 @@ type fakeHost struct {
 	mu                            sync.Mutex
 	values                        map[string][]byte
 	accounts                      map[int64]*pluginv1.ResolveOutboundIdentityResponse
+	schedulable                   map[int64]bool
 	gets, sets, deletes, resolves int
 }
 
 func testHost(ids ...int64) *fakeHost {
-	h := &fakeHost{values: map[string][]byte{}, accounts: map[int64]*pluginv1.ResolveOutboundIdentityResponse{}}
+	h := &fakeHost{values: map[string][]byte{}, accounts: map[int64]*pluginv1.ResolveOutboundIdentityResponse{}, schedulable: map[int64]bool{}}
 	for _, id := range ids {
 		h.accounts[id] = &pluginv1.ResolveOutboundIdentityResponse{Found: true, AccountId: id, Platform: "openai", AccountType: "oauth", Token: fmt.Sprintf("test-token-%d", id), Headers: map[string]*pluginv1.HeaderValues{"Chatgpt-Account-Id": {Values: []string{fmt.Sprint(id)}}}}
+		h.schedulable[id] = true
 	}
 	return h
 }
@@ -60,6 +62,7 @@ func (h *fakeHost) ListAccounts(context.Context, *pluginv1.ListAccountsRequest, 
 	r := &pluginv1.ListAccountsResponse{}
 	for id := range h.accounts {
 		r.AccountIds = append(r.AccountIds, id)
+		r.Accounts = append(r.Accounts, &pluginv1.AccountInfo{Id: id, Platform: "openai", AccountType: "oauth", Schedulable: h.schedulable[id]})
 	}
 	return r, nil
 }
@@ -166,6 +169,23 @@ func TestConfigStrictIsolation(t *testing.T) {
 	prefer, err := ParseConfig([]byte(`{"prefer_previous_ip":true}`))
 	if err != nil || !prefer.PreferPreviousIP {
 		t.Fatalf("previous egress preference not parsed: %+v %v", prefer, err)
+	}
+}
+
+func TestPausedAccountsAreNotScheduled(t *testing.T) {
+	h := testHost(42)
+	h.schedulable[42] = false
+	var requests atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	e := testEngine(t, h, proxy.URL)
+	apply(t, e, testConfig(proxy.URL, 42))
+	time.Sleep(150 * time.Millisecond)
+	if requests.Load() != 0 || h.resolves != 0 {
+		t.Fatalf("paused account was scheduled: requests=%d resolves=%d", requests.Load(), h.resolves)
 	}
 }
 
