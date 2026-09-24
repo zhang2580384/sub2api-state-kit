@@ -7,14 +7,16 @@
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
-    allow_state_780: false,
+    allow_state_780: false, state_780_ttl_seconds: 240, target_gateway: 'unified-88',
+    route_cookie_reuse: true, mint_fingerprint_convergence: true,
     ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
     cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
     request_rewrite_enabled: false, default_request_timezone: 'Asia/Singapore',
     ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
   const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '旧模式票据有效期'], refresh_before_seconds: [0, 3599, '旧模式提前续期'],
     proxy_generator_ttl_minutes: [1, 180, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
-    cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], standby_lead_seconds: [10, 600, '备用票提前时间'],
+    cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], state_780_ttl_seconds: [30, 1800, '780 票据持续期'],
+    standby_lead_seconds: [10, 600, '备用票提前时间'],
     attempt_interval_seconds: [1, 300, '常规重试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
@@ -33,6 +35,10 @@
     generator_region_blocked: '生成器出口位于阻止地区，正在重试',
     business_egress_unavailable: 'Cookie 业务出口暂时不可用', business_region_blocked: 'Cookie 业务出口位于阻止地区',
     cookie_session_incomplete: 'Cookie 会话不完整，正在重新获取',
+    state_session_incomplete: '780 会话 Cookie 不完整，正在重新获取',
+    gateway_unavailable: '未取得目标网关路由 Cookie，正在重新打票', gateway_unknown: '网关 Cookie 无法识别，正在重新打票',
+    gateway_mismatch: '打票落到非目标网关，正在重新打票',
+    expired_ticket: '票据签发时间已过期，正在重新获取',
     ticket_persistence_failed: '票据保存失败', upstream_unauthorized: '上游拒绝授权（401）', upstream_forbidden: '上游拒绝访问（403）',
     upstream_rate_limited: '上游限流（429）', upstream_rejected: '上游拒绝请求', model_mismatch: '返回模型不匹配，正在重新获取票据',
     state_312: '收到 312 状态，正在重新获取票据', model_mismatch_persistence_failed: '返回模型不匹配，票据失效记录保存失败',
@@ -137,6 +143,13 @@
     if (!seen.has('HK')) countries.push('HK');
     return countries.sort();
   }
+  function normalizeTargetGateway(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (raw === '' || raw === 'any' || raw === '*') return '';
+    const match = /^unified[-_.]?(\d+)$/.exec(raw);
+    if (!match) throw new Error('目标网关须填写 any 或 unified-N。');
+    return 'unified-' + match[1];
+  }
   function normalizeConfig(input) {
     const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
     const config = Object.assign({}, DEFAULT_CONFIG, { proxy_generator_blocked_countries: DEFAULT_CONFIG.proxy_generator_blocked_countries.slice() });
@@ -169,6 +182,9 @@
     config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
     if (typeof config.prefer_previous_ip !== 'boolean') throw new Error('上一轮可用出口复用开关格式不正确。');
     if (typeof config.allow_state_780 !== 'boolean') throw new Error('780 状态兼容开关格式不正确。');
+    if (typeof config.route_cookie_reuse !== 'boolean') throw new Error('网关 Cookie 复用开关格式不正确。');
+    if (typeof config.mint_fingerprint_convergence !== 'boolean') throw new Error('打票指纹收敛开关格式不正确。');
+    config.target_gateway = normalizeTargetGateway(config.target_gateway);
     if (typeof config.request_rewrite_enabled !== 'boolean') throw new Error('请求环境替换开关格式不正确。');
     config.default_request_timezone = validateTimezone(config.default_request_timezone, '默认请求时区');
     if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('运行方式须选择稳定同出口或 Cookie 分流。');
@@ -186,6 +202,9 @@
     }
     if (config.ticket_mode === 'legacy' && config.standby_lead_seconds >= config.ttl_minutes * 60) {
       throw new Error('备用票提前时间必须小于旧模式票据有效期。');
+    }
+    if (config.allow_state_780 && config.standby_lead_seconds >= config.state_780_ttl_seconds) {
+      throw new Error('备用票提前时间必须小于 780 票据持续期。');
     }
     if (!Array.isArray(config.accounts) || config.accounts.length > 256) throw new Error('最多配置 256 个账号。');
     const ids = new Set();
@@ -243,7 +262,8 @@
       upstream_transport: '传输失败', upstream_transport_dns: 'DNS 失败', upstream_transport_connect: '连接失败',
       upstream_transport_tls: 'TLS 失败', upstream_transport_timeout: '传输超时', upstream_transport_reset: '连接重置',
       generator_failed: '生成器调用失败', egress_unavailable: '出口不可用', region_blocked: '地区被阻止',
-      egress_changed: '出口 IP 不一致' })[outcome] || '未知结果';
+      egress_changed: '出口 IP 不一致', session_incomplete: '会话不完整',
+      gateway_unavailable: '未取得目标网关', gateway_unknown: '网关无法识别', gateway_mismatch: '网关不匹配' })[outcome] || '未知结果';
   }
   function safeDiagnosticText(value, max) {
     if (typeof value !== 'string') return '';
@@ -267,6 +287,11 @@
       egress_match: typeof event.egress_match === 'boolean' ? event.egress_match : null,
       state_length: Number.isSafeInteger(event.state_length) && event.state_length >= 0 && event.state_length <= 8192 ? event.state_length : 0,
       state_class: stateClasses.has(event.state_class) ? event.state_class : '',
+      state_fingerprint: safeDiagnosticText(event.state_fingerprint, 16),
+      ticket_age_seconds: Number.isSafeInteger(event.ticket_age_seconds) && event.ticket_age_seconds >= 0 ? event.ticket_age_seconds : 0,
+      gateway: safeDiagnosticText(event.gateway, 32),
+      cookie_fingerprint: safeDiagnosticText(event.cookie_fingerprint, 16),
+      session_bound: event.session_bound === true,
       response_model: responseModel,
       http_status: Number.isSafeInteger(event.http_status) && event.http_status >= 100 && event.http_status <= 599 ? event.http_status : 0,
       outcome: safeDiagnosticText(event.outcome, 64),
@@ -329,7 +354,8 @@
     let lastDiagnostics = [];
     const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_seconds: 'refresh-before-seconds',
       proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
-      cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', standby_lead_seconds: 'standby-lead-seconds',
+      cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', state_780_ttl_seconds: 'state-780-ttl-seconds',
+      standby_lead_seconds: 'standby-lead-seconds',
       max_attempts: 'max-attempts', attempt_interval_seconds: 'attempt-interval-seconds', cooldown_seconds: 'cooldown-seconds' };
     function element(tag, text, className) {
       const node = document.createElement(tag);
@@ -495,6 +521,9 @@
       byID('proxy-generator-blocked-countries').value = config.proxy_generator_blocked_countries.join(', ');
       byID('prefer-previous-ip').checked = config.prefer_previous_ip === true;
       byID('allow-state-780').checked = config.allow_state_780 === true;
+      byID('route-cookie-reuse').checked = config.route_cookie_reuse === true;
+      byID('mint-fingerprint-convergence').checked = config.mint_fingerprint_convergence === true;
+      byID('target-gateway').value = config.target_gateway || 'any';
       byID('request-rewrite-enabled').checked = config.request_rewrite_enabled === true;
       byID('default-request-timezone').value = config.default_request_timezone;
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
@@ -519,6 +548,9 @@
         proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean),
         prefer_previous_ip: byID('prefer-previous-ip').checked,
         allow_state_780: byID('allow-state-780').checked,
+        route_cookie_reuse: byID('route-cookie-reuse').checked,
+        mint_fingerprint_convergence: byID('mint-fingerprint-convergence').checked,
+        target_gateway: normalizeTargetGateway(byID('target-gateway').value),
         request_rewrite_enabled: byID('request-rewrite-enabled').checked,
         default_request_timezone: byID('default-request-timezone').value.trim()
       };
@@ -586,7 +618,11 @@
         if (event.egress_match === true) egress.appendChild(element('span', '出口一致', 'badge success'));
         else if (event.egress_match === false) egress.appendChild(element('span', '出口不一致', 'badge warning'));
         row.appendChild(egress);
-        row.appendChild(element('td', (event.state_class || '—') + (event.state_length ? ' · ' + event.state_length : '')));
+        const state = element('td', (event.state_class || '—') + (event.state_length ? ' · ' + event.state_length : ''));
+        if (event.ticket_age_seconds) state.appendChild(element('div', '票龄 ' + event.ticket_age_seconds + ' 秒', 'diagnostic-sub'));
+        if (event.gateway) state.appendChild(element('div', event.gateway, 'diagnostic-sub'));
+        if (event.session_bound) state.appendChild(element('span', '会话绑定', 'badge success'));
+        row.appendChild(state);
         row.appendChild(element('td', (event.http_status ? event.http_status + ' · ' : '') + (event.response_model || '—'), 'diagnostic-mono'));
         const outcome = element('td');
         outcome.appendChild(element('span', diagnosticOutcomeLabel(event.outcome), event.outcome === 'accepted' || event.outcome === 'model_match' ? 'badge success' : event.outcome === 'model_mismatch' || event.outcome === 'state_312' || event.outcome === 'validation_failed' ? 'badge warning' : 'badge'));
@@ -742,6 +778,9 @@
           return [event.time, event.account_id ? '#' + event.account_id : '', event.model, diagnosticStageLabel(event.stage),
             [event.upstream_proxy, event.target_proxy].filter(Boolean).join(' -> '), 'capture=' + (event.capture_egress || 'unknown'),
             'fixed=' + (event.fixed_egress || 'unknown'), 'state=' + (event.state_class || 'unknown'), 'response=' + (event.response_model || 'unknown'),
+            'age=' + (event.ticket_age_seconds || 0), 'gateway=' + (event.gateway || 'unknown'),
+            'state_fingerprint=' + (event.state_fingerprint || 'unknown'), 'cookie_fingerprint=' + (event.cookie_fingerprint || 'unknown'),
+            'session_bound=' + (event.session_bound ? 'true' : 'false'),
             'outcome=' + event.outcome, event.error].filter(Boolean).join('\t');
         }).join('\n');
         if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) await global.navigator.clipboard.writeText(text);

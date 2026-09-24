@@ -200,7 +200,7 @@ func TestCookieBusinessResponseRollsStateForward(t *testing.T) {
 	current := &ticket{
 		AccountID: 7, Model: "gpt-6-astra", Plan: "pro", State: testState(292), Version: "version",
 		ConfigFingerprint: configFingerprint(c, a, "gpt-6-astra"), TicketMode: ticketModeCookie,
-		Cookies: map[string]string{"__cf_bm": "old"}, SessionID: "session",
+		Cookies: map[string]string{"__cf_bm": "old", "__cflb": "lb", "__oailb": "unified-88"}, SessionID: "session",
 	}
 	e := &Engine{config: c, tickets: map[string]*ticket{keyFor(7, "gpt-6-astra"): current}}
 	receipt := &receipt{

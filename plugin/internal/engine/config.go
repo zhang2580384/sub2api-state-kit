@@ -17,14 +17,16 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.3.3"
+const Version = "4.4.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
 const (
 	defaultRequestTimezone = "Asia/Singapore"
 	defaultAcceptLanguage  = "en-US,en;q=0.9"
+	defaultTargetGateway   = "unified-88"
 	compatStateLength      = 780
+	compatStateTTLSeconds  = 240
 )
 
 const (
@@ -54,6 +56,10 @@ type Config struct {
 	ProxyGeneratorTTLMinutes       int      `json:"proxy_generator_ttl_minutes"`
 	PreferPreviousIP               bool     `json:"prefer_previous_ip"`
 	AllowState780                  bool     `json:"allow_state_780"`
+	State780TTLSeconds             int      `json:"state_780_ttl_seconds"`
+	TargetGateway                  string   `json:"target_gateway"`
+	RouteCookieReuse               bool     `json:"route_cookie_reuse"`
+	MintFingerprintConvergence     bool     `json:"mint_fingerprint_convergence"`
 	TicketMode                     string   `json:"ticket_mode"`
 	CookieCaptureMode              string   `json:"cookie_capture_mode"`
 	CookieCaptureProxyURL          string   `json:"cookie_capture_proxy_url"`
@@ -98,6 +104,10 @@ func DefaultConfig() Config {
 		CooldownSeconds:                300,
 		ProxyGeneratorBlockedCountries: []string{"HK"},
 		ProxyGeneratorTTLMinutes:       180,
+		State780TTLSeconds:             compatStateTTLSeconds,
+		TargetGateway:                  defaultTargetGateway,
+		RouteCookieReuse:               true,
+		MintFingerprintConvergence:     true,
 		TicketMode:                     ticketModeLegacy,
 		CookieCaptureMode:              captureModeGenerator,
 		CookieTicketTTLSeconds:         300,
@@ -153,6 +163,11 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	c.CookieCaptureProxyURL = strings.TrimSpace(c.CookieCaptureProxyURL)
 	c.CookieBusinessProxyURL = strings.TrimSpace(c.CookieBusinessProxyURL)
+	targetGateway, err := normalizeTargetGateway(c.TargetGateway)
+	if err != nil {
+		return c, err
+	}
+	c.TargetGateway = targetGateway
 	c.DefaultRequestTimezone = strings.TrimSpace(c.DefaultRequestTimezone)
 	if c.DefaultRequestTimezone == "" {
 		c.DefaultRequestTimezone = defaultRequestTimezone
@@ -184,6 +199,9 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.ProxyGeneratorTTLMinutes < 1 || c.ProxyGeneratorTTLMinutes > 180 {
 		return c, errors.New("proxy_generator_ttl_minutes must be 1..180")
 	}
+	if c.State780TTLSeconds < 30 || c.State780TTLSeconds > 1800 {
+		return c, errors.New("state_780_ttl_seconds must be 30..1800")
+	}
 	if c.CookieTicketTTLSeconds < 30 || c.CookieTicketTTLSeconds > 1800 {
 		return c, errors.New("cookie_ticket_ttl_seconds must be 30..1800")
 	}
@@ -198,6 +216,9 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	if c.TicketMode == ticketModeLegacy && c.StandbyLeadSeconds >= c.TTLMinutes*60 {
 		return c, errors.New("standby_lead_seconds must be less than ttl_minutes")
+	}
+	if c.AllowState780 && c.StandbyLeadSeconds >= c.State780TTLSeconds {
+		return c, errors.New("standby_lead_seconds must be less than state_780_ttl_seconds")
 	}
 	if err := validateProxy(c.UpstreamProxyURL); err != nil {
 		return c, err
@@ -345,6 +366,19 @@ func normalizeBlockedCountries(raw []string) ([]string, error) {
 	return result, nil
 }
 
+func normalizeTargetGateway(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", "any", "*":
+		return "", nil
+	}
+	match := gatewayNumberPattern.FindStringSubmatch(value)
+	if len(match) != 2 || match[0] != value {
+		return "", errors.New("target_gateway must be any or unified-N")
+	}
+	return "unified-" + match[1], nil
+}
+
 func normalizeAccountDisplayFields(a *AccountConfig) error {
 	var err error
 	if a.Name, err = cleanDisplayField(a.Name, 120, "account name"); err != nil {
@@ -463,12 +497,14 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v7", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+	return digest("v9", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
 		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
 		c.TicketMode, c.CookieCaptureMode, c.CookieCaptureProxyURL, c.CookieBusinessProxyURL,
 		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),
 		strconv.FormatBool(c.RequestRewriteEnabled), c.DefaultRequestTimezone,
-		strconv.FormatBool(c.AllowState780),
+		strconv.FormatBool(c.AllowState780), strconv.Itoa(c.State780TTLSeconds),
+		c.TargetGateway,
+		strconv.FormatBool(c.RouteCookieReuse), strconv.FormatBool(c.MintFingerprintConvergence),
 		a.Plan, model, jsonText(struct {
 			ID             int64
 			TTL            int
@@ -487,6 +523,16 @@ func effectiveTicketTTL(c Config, a AccountConfig) time.Duration {
 	}
 	return time.Duration(minutes) * time.Minute
 }
+func effectiveTicketTTLForState(c Config, a AccountConfig, state string) time.Duration {
+	ttl := effectiveTicketTTL(c, a)
+	if validState(state, compatStateLength) {
+		compatTTL := time.Duration(c.State780TTLSeconds) * time.Second
+		if compatTTL < ttl {
+			ttl = compatTTL
+		}
+	}
+	return ttl
+}
 func effectiveTTLMinutes(c Config, a AccountConfig) int {
 	if c.TicketMode == ticketModeCookie {
 		return max(1, (c.CookieTicketTTLSeconds+59)/60)
@@ -498,6 +544,17 @@ func effectiveTTLMinutes(c Config, a AccountConfig) int {
 }
 func effectiveRefreshBefore(c Config, a AccountConfig) time.Duration {
 	ttl := effectiveTicketTTL(c, a)
+	refresh := time.Duration(c.RefreshBeforeSeconds) * time.Second
+	if refresh < ttl {
+		return refresh
+	}
+	if ttl <= time.Second {
+		return 0
+	}
+	return ttl - time.Second
+}
+func effectiveRefreshBeforeForState(c Config, a AccountConfig, state string) time.Duration {
+	ttl := effectiveTicketTTLForState(c, a, state)
 	refresh := time.Duration(c.RefreshBeforeSeconds) * time.Second
 	if refresh < ttl {
 		return refresh

@@ -117,10 +117,14 @@ func (e *Engine) schedule() {
 					delete(e.standbyTickets, k)
 				}
 			} else {
-				lead := effectiveRefreshBefore(e.config, a)
+				lead := effectiveRefreshBeforeForState(e.config, a, t.State)
 				standbyEnabled := e.config.StandbyTicketEnabled
 				if standbyEnabled {
 					lead = time.Duration(e.config.StandbyLeadSeconds) * time.Second
+					ttl := effectiveTicketTTLForState(e.config, a, t.State)
+					if ttl > time.Second && lead >= ttl {
+						lead = ttl - time.Second
+					}
 					if validTicket(e.standbyTickets[k], e.config, a, model, now) {
 						continue
 					}
@@ -332,15 +336,23 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		captured := time.Now()
 		sessionID := randomID()
 		cookies := map[string]string{}
-		captureResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "", sessionID, cookies)
+		if c.RouteCookieReuse {
+			cookies = e.preferredRouteCookies(a.AccountID, c.TargetGateway)
+		}
+		captureResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "", sessionID, cookies, c.MintFingerprintConvergence)
 		candidate, status, captureModel := captureResult.State, captureResult.Status, captureResult.Model
 		cookies = captureResult.Cookies
+		if c.RouteCookieReuse {
+			e.rememberRouteCookies(a.AccountID, cookies, c.TargetGateway)
+		}
 		if !generatorMode && !cookieMode {
 			captureEgress = e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
 		}
 		captureEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
 			UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, CaptureEgress: captureEgress,
-			StateLength: len(candidate), StateClass: stateDiagnosticClass(candidate), ResponseModel: captureModel,
+			StateLength: len(candidate), StateClass: stateDiagnosticClass(candidate), StateFingerprint: stateFingerprint(candidate),
+			TicketAgeSeconds: stateAgeSeconds(candidate, time.Now()), Gateway: gatewayFromCookies(cookies),
+			CookieFingerprint: cookieFingerprint(cookies), ResponseModel: captureModel,
 			HTTPStatus: status, DurationMS: time.Since(attemptStarted).Milliseconds()}
 		if err != nil {
 			reason = "harvest_failed"
@@ -356,6 +368,13 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		if !validPlanState(candidate, a.Plan, c.AllowState780) {
 			reason = "unexpected_state_length"
 			captureEvent.Outcome = "unexpected_state"
+			e.recordDiagnostic(captureEvent)
+			continue
+		}
+		if _, gatewayReason := routeGatewayAcceptance(candidate, cookies, c.TargetGateway); gatewayReason != "" {
+			reason = gatewayReason
+			captureEvent.Outcome = gatewayReason
+			captureEvent.Error = gatewayReason
 			e.recordDiagnostic(captureEvent)
 			continue
 		}
@@ -429,11 +448,18 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			e.recordDiagnostic(validationEvent)
 			continue
 		}
-		validationResult, err := e.probe(ctx, fixed, model, fixedProxyURL, fixedUpstreamProxyURL, candidate, sessionID, cookies)
+		validationResult, err := e.probe(ctx, fixed, model, fixedProxyURL, fixedUpstreamProxyURL, candidate, sessionID, cookies, c.MintFingerprintConvergence)
 		returned, status, validationModel := validationResult.State, validationResult.Status, validationResult.Model
 		cookies = validationResult.Cookies
+		if c.RouteCookieReuse {
+			e.rememberRouteCookies(a.AccountID, cookies, c.TargetGateway)
+		}
 		validationEvent.StateLength = len(returned)
 		validationEvent.StateClass = stateDiagnosticClass(returned)
+		validationEvent.StateFingerprint = stateFingerprint(returned)
+		validationEvent.TicketAgeSeconds = stateAgeSeconds(returned, time.Now())
+		validationEvent.Gateway = gatewayFromCookies(cookies)
+		validationEvent.CookieFingerprint = cookieFingerprint(cookies)
 		validationEvent.ResponseModel = validationModel
 		validationEvent.HTTPStatus = status
 		validationEvent.DurationMS = time.Since(validationStarted).Milliseconds()
@@ -463,8 +489,20 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			}
 			validatedState = returned
 		}
-		if cookieMode && (sessionID == "" || len(cookies) == 0) {
-			reason = "cookie_session_incomplete"
+		gateway, gatewayReason := routeGatewayAcceptance(validatedState, cookies, c.TargetGateway)
+		if gatewayReason != "" {
+			reason = gatewayReason
+			validationEvent.Outcome = gatewayReason
+			validationEvent.Error = gatewayReason
+			e.recordDiagnostic(validationEvent)
+			continue
+		}
+		sessionBound := cookieMode || stateRequiresSession(validatedState)
+		if sessionBound && (sessionID == "" || len(cookies) == 0) {
+			reason = "state_session_incomplete"
+			if cookieMode {
+				reason = "cookie_session_incomplete"
+			}
 			validationEvent.Outcome = "session_incomplete"
 			validationEvent.Error = reason
 			e.recordDiagnostic(validationEvent)
@@ -476,12 +514,23 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		if generatorMode && !cookieMode {
 			generatedProxyURL = fixedProxyURL
 		}
+		issuedAt := ticketIssuedAt(validatedState, captured)
+		expiresAt := issuedAt.Add(effectiveTicketTTLForState(c, a, validatedState))
+		if !expiresAt.After(time.Now()) {
+			reason = "expired_ticket"
+			validationEvent.Outcome = "expired_ticket"
+			validationEvent.Error = reason
+			e.recordDiagnostic(validationEvent)
+			continue
+		}
 		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: validatedState, Version: randomID(),
 			ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), GeneratedProxyURL: generatedProxyURL,
-			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured,
-			ExpiresAt: captured.Add(effectiveTicketTTL(c, a)), TicketMode: c.TicketMode,
+			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured, IssuedAt: issuedAt,
+			ExpiresAt: expiresAt, TicketMode: c.TicketMode, SessionBound: sessionBound,
+			Gateway:         gateway,
 			CaptureProxyURL: targetProxyURL, CaptureEgressIP: captureEgress, BusinessEgressIP: fixedEgress,
 			Cookies: cookies, SessionID: sessionID}
+		validationEvent.SessionBound = sessionBound
 		if e.commit(ctx, host, c, a, model, k, gen, t, true, standby) {
 			if generatorCapture {
 				e.rememberPreviousEgress(ctx, host, a.AccountID, targetProxyURL, captureEgress)
@@ -497,7 +546,9 @@ func isStopStatus(status int) bool { return status == 401 || status == 403 || st
 func fastRetryReason(reason string) bool {
 	switch reason {
 	case "generator_region_blocked", "business_region_blocked", "sticky_egress_changed",
-		"unexpected_state_length", "fixed_proxy_validation_failed", "cookie_session_incomplete":
+		"unexpected_state_length", "fixed_proxy_validation_failed", "cookie_session_incomplete",
+		"state_session_incomplete", "expired_ticket",
+		"gateway_unavailable", "gateway_unknown", "gateway_mismatch":
 		return true
 	default:
 		return false
@@ -587,7 +638,8 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	}
 	event := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "restore",
 		UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL,
-		FixedEgress: fixedEgress}
+		FixedEgress: fixedEgress, Gateway: gatewayFromCookies(t.Cookies),
+		CookieFingerprint: cookieFingerprint(t.Cookies), SessionBound: t.SessionBound}
 	if (c.TicketMode == ticketModeCookie || a.EgressMode == egressModeGenerator) && fixedEgress == "" {
 		event.Outcome = "egress_unavailable"
 		event.Error = "business_egress_unavailable"
@@ -611,10 +663,14 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 		e.recordDiagnostic(event)
 		return false, 0
 	}
-	probeResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, t.State, t.SessionID, t.Cookies)
+	probeResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, t.State, t.SessionID, t.Cookies, c.MintFingerprintConvergence)
 	returned, status, responseModel := probeResult.State, probeResult.Status, probeResult.Model
 	event.StateLength = len(returned)
 	event.StateClass = stateDiagnosticClass(returned)
+	event.StateFingerprint = stateFingerprint(returned)
+	event.TicketAgeSeconds = stateAgeSeconds(returned, time.Now())
+	event.Gateway = gatewayFromCookies(probeResult.Cookies)
+	event.CookieFingerprint = cookieFingerprint(probeResult.Cookies)
 	event.ResponseModel = responseModel
 	event.HTTPStatus = status
 	event.DurationMS = time.Since(restoreStarted).Milliseconds()
@@ -631,9 +687,32 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	}
 	if returned != "" {
 		t.State = returned
+		now := time.Now().UTC()
+		t.CapturedAt = now
+		t.IssuedAt = ticketIssuedAt(returned, now)
+		t.ExpiresAt = t.IssuedAt.Add(effectiveTicketTTLForState(c, a, returned))
+		if stateRequiresSession(returned) {
+			t.SessionBound = true
+		}
 	}
 	t.Cookies = probeResult.Cookies
+	t.Gateway = gatewayFromCookies(t.Cookies)
 	t.BusinessEgressIP = fixedEgress
+	if c.RouteCookieReuse {
+		e.rememberRouteCookies(a.AccountID, t.Cookies, c.TargetGateway)
+	}
+	if (c.TicketMode == ticketModeCookie || t.SessionBound) && (t.SessionID == "" || len(t.Cookies) == 0) {
+		event.Outcome = "session_incomplete"
+		event.Error = "state_session_incomplete"
+		e.recordDiagnostic(event)
+		return false, status
+	}
+	if _, gatewayReason := routeGatewayAcceptance(t.State, t.Cookies, c.TargetGateway); gatewayReason != "" {
+		event.Outcome = gatewayReason
+		event.Error = gatewayReason
+		e.recordDiagnostic(event)
+		return false, status
+	}
 	event.Outcome = "accepted"
 	e.recordDiagnostic(event)
 	if !e.commit(ctx, host, c, a, model, k, gen, &t, false, standby) {
@@ -692,20 +771,30 @@ type ticketProbeResult struct {
 	SessionID string
 }
 
-func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundIdentityResponse, model, proxyURL, upstreamProxyURL, state, sessionID string, cookies map[string]string) (ticketProbeResult, error) {
+func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundIdentityResponse, model, proxyURL, upstreamProxyURL, state, sessionID string, cookies map[string]string, fingerprintConvergence bool) (ticketProbeResult, error) {
 	result := ticketProbeResult{Cookies: cloneCookies(cookies), SessionID: sessionID}
 	if result.Cookies == nil {
 		result.Cookies = map[string]string{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	payload := map[string]any{"model": model, "store": false, "stream": true, "instructions": "Reply with exactly: pong", "input": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}}}
+	payload := map[string]any{"model": model, "store": false, "stream": true, "instructions": "", "input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}}}
+	if fingerprintConvergence {
+		payload["reasoning"] = map[string]any{"effort": "low"}
+		payload["tool_choice"] = "auto"
+		payload["parallel_tool_calls"] = false
+	} else {
+		payload["instructions"] = "Reply with exactly: pong"
+	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.probeURL, bytes.NewReader(body))
 	if err != nil {
 		return result, errors.New("probe construction failed")
 	}
 	for name, values := range identity.Headers {
+		if fingerprintConvergence && !strings.EqualFold(name, "Chatgpt-Account-Id") {
+			continue
+		}
 		if values == nil {
 			continue
 		}
@@ -718,15 +807,21 @@ func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundId
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	if sessionID == "" {
 		sessionID = randomID()
 		result.SessionID = sessionID
 	}
 	req.Header.Set("session_id", sessionID)
-	req.Header.Set("version", "0.153.4")
-	req.Header.Set("User-Agent", "codex_cli_rs/0.153.4")
-	req.Header.Set("originator", "codex_cli_rs")
+	if fingerprintConvergence {
+		req.Header.Set("session-id", sessionID)
+		req.Header.Set("User-Agent", "codex-tui/0.154.0 (Ubuntu 24.04; x86_64) OVH (codex-tui; 0.154.0)")
+		req.Header.Set("originator", "codex-tui")
+	} else {
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("version", "0.153.4")
+		req.Header.Set("User-Agent", "codex_cli_rs/0.153.4")
+		req.Header.Set("originator", "codex_cli_rs")
+	}
 	if cookie := cookieHeader(result.Cookies); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}

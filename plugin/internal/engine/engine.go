@@ -40,6 +40,7 @@ type Engine struct {
 	tickets          map[string]*ticket
 	standbyTickets   map[string]*ticket
 	previous         map[int64]previousEgress
+	routeSessions    map[int64]routeSession
 	records          map[string]*jobRecord
 	jobs             map[string]uint64
 	revoked          map[string]string
@@ -74,8 +75,11 @@ type ticket struct {
 	GeneratedEgressIP   string            `json:"generated_egress_ip,omitempty"`
 	IdentityFingerprint string            `json:"identity_fingerprint"`
 	CapturedAt          time.Time         `json:"captured_at"`
+	IssuedAt            time.Time         `json:"issued_at,omitempty"`
 	ExpiresAt           time.Time         `json:"expires_at"`
 	TicketMode          string            `json:"ticket_mode,omitempty"`
+	SessionBound        bool              `json:"session_bound,omitempty"`
+	Gateway             string            `json:"gateway,omitempty"`
 	CaptureProxyURL     string            `json:"-"`
 	CaptureEgressIP     string            `json:"capture_egress_ip,omitempty"`
 	BusinessEgressIP    string            `json:"business_egress_ip,omitempty"`
@@ -92,6 +96,8 @@ type receipt struct {
 	State, Version, Key, ConfigFingerprint string
 	TargetProxyURL, UpstreamProxyURL       string
 	TicketMode                             string
+	SessionBound                           bool
+	Gateway                                string
 	Cookies                                map[string]string
 	SessionID                              string
 	Generation                             uint64
@@ -144,7 +150,8 @@ func newEngine(host pluginv1.HostServiceClient, probeURL string, tick time.Durat
 		directory: map[int64]bool{}, schedulable: map[int64]bool{},
 		tickets: map[string]*ticket{}, standbyTickets: map[string]*ticket{}, records: map[string]*jobRecord{},
 		previous: map[int64]previousEgress{}, jobs: map[string]uint64{}, revoked: map[string]string{}, semaphore: make(chan struct{}, 4),
-		clients: newClientPool(), probeURL: probeURL, egressURL: "https://api.ipify.org?format=json",
+		routeSessions: map[int64]routeSession{},
+		clients:       newClientPool(), probeURL: probeURL, egressURL: "https://api.ipify.org?format=json",
 		geoURLs: []string{
 			"http://ip-api.com/json/{ip}?fields=status,countryCode,query",
 			"https://ipwho.is/{ip}",
@@ -270,6 +277,11 @@ func (e *Engine) ApplyConfig(_ context.Context, r *pluginv1.ApplyConfigRequest) 
 	for id := range e.previous {
 		if _, ok := findAccount(c, id); !ok {
 			delete(e.previous, id)
+		}
+	}
+	for id := range e.routeSessions {
+		if _, ok := findAccount(c, id); !ok {
+			delete(e.routeSessions, id)
 		}
 	}
 	e.mu.Unlock()
@@ -427,6 +439,7 @@ func (e *Engine) ticketForRequest(_ context.Context, start *pluginv1.ForwardRequ
 		return &receipt{
 			State: t.State, Version: t.Version, Key: k, ConfigFingerprint: t.ConfigFingerprint,
 			TargetProxyURL: targetProxyURL, UpstreamProxyURL: upstreamProxyURL, TicketMode: t.TicketMode,
+			SessionBound: t.SessionBound, Gateway: t.Gateway,
 			Cookies: cloneCookies(t.Cookies), SessionID: t.SessionID, Generation: e.generation,
 		}, nil
 	}
@@ -441,8 +454,16 @@ func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Ti
 		!t.ExpiresAt.After(t.CapturedAt) || !now.Before(t.ExpiresAt) {
 		return false
 	}
+	if !t.IssuedAt.IsZero() && (t.IssuedAt.After(now.Add(time.Minute)) || t.IssuedAt.After(t.CapturedAt.Add(time.Minute))) {
+		return false
+	}
+	if c.TicketMode == ticketModeCookie || t.SessionBound {
+		if t.SessionID == "" || len(t.Cookies) == 0 {
+			return false
+		}
+	}
 	if c.TicketMode == ticketModeCookie {
-		if t.TicketMode != ticketModeCookie || t.SessionID == "" || len(t.Cookies) == 0 {
+		if t.TicketMode != ticketModeCookie {
 			return false
 		}
 	} else {
@@ -454,7 +475,12 @@ func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Ti
 			return false
 		}
 	}
-	return t.ExpiresAt.Sub(t.CapturedAt) <= effectiveTicketTTL(c, a)
+	anchor := t.CapturedAt
+	if !t.IssuedAt.IsZero() {
+		anchor = t.IssuedAt
+	}
+	ttl := t.ExpiresAt.Sub(anchor)
+	return ttl > 0 && ttl <= effectiveTicketTTLForState(c, a, t.State)
 }
 
 func standbyMatches(standby, identitySource *ticket, expectedFingerprint, expectedIdentity string) bool {

@@ -368,6 +368,43 @@ func TestForwardInjectsTicketAndInvalidatesOnModelMismatch(t *testing.T) {
 	}
 }
 
+func TestForwardLegacy780InjectsSessionCookieAndSessionID(t *testing.T) {
+	e := forwardingEngine(t, true)
+	e.config.AllowState780 = true
+	a := e.config.Accounts[0]
+	now := time.Now().UTC()
+	issuedAt := now.Add(-15 * time.Second).Truncate(time.Second)
+	state := testFernetState(compatStateLength, issuedAt)
+	e.tickets[keyFor(7, "gpt-test")] = &ticket{
+		AccountID: 7, Model: "gpt-test", Plan: "pro", State: state, Version: "test-version",
+		ConfigFingerprint: configFingerprint(e.config, a, "gpt-test"), FixedFingerprint: proxyFingerprint(""),
+		IdentityFingerprint: stableHeaders(7, nil), CapturedAt: now, IssuedAt: issuedAt,
+		ExpiresAt: issuedAt.Add(240 * time.Second), SessionBound: true, SessionID: "session-780",
+		Cookies: map[string]string{"__cf_bm": "bound"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if got := r.Header.Get(StateHeader); got != state {
+			t.Errorf("state = %q; want 780 ticket", got)
+		}
+		if got := r.Header.Get("session_id"); got != "session-780" {
+			t.Errorf("session_id = %q; want session-780", got)
+		}
+		if got := r.Header.Get("Cookie"); !strings.Contains(got, "__cf_bm=bound") {
+			t.Errorf("Cookie = %q; want bound 780 cookie", got)
+		}
+		completed(w, "gpt-test")
+	}))
+	defer server.Close()
+	body := []byte(`{"model":"gpt-test","stream":true}`)
+	start := mockStart(server.URL, true, int64(len(body)))
+	start.Headers["Cookie"] = &pluginv1.HeaderValues{Values: []string{"caller=bad"}}
+	start.Headers["session_id"] = &pluginv1.HeaderValues{Values: []string{"caller-session"}}
+	if err := e.Forward(fixedStream(start, body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestForwardUsesAccountStickyProxyFromTicket(t *testing.T) {
 	var directHits atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

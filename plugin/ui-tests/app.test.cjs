@@ -17,6 +17,10 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7, name: ' Example ' }] }).accounts[0].name, 'Example');
   assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
   assert.equal(ui.normalizeConfig({}).allow_state_780, false);
+  assert.equal(ui.normalizeConfig({}).state_780_ttl_seconds, 240);
+  assert.equal(ui.normalizeConfig({}).target_gateway, 'unified-88');
+  assert.equal(ui.normalizeConfig({}).route_cookie_reuse, true);
+  assert.equal(ui.normalizeConfig({}).mint_fingerprint_convergence, true);
   assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
   assert.equal(ui.normalizeConfig({}).cookie_capture_mode, 'generator');
   assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 300);
@@ -145,6 +149,8 @@ test('validates bounds, renewal horizon, duplicate accounts and model allowlist'
   assert.throws(() => ui.validateConfig(configured({ proxy_generator_ttl_minutes: 181 })), /1–180/);
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 180, refresh_before_seconds: 120, proxy_generator_ttl_minutes: 180 })));
   assert.throws(() => ui.validateConfig(configured({ cooldown_seconds: 29 })), /30–3600/);
+  assert.throws(() => ui.validateConfig(configured({ target_gateway: 'unified-abc' })), /目标网关/);
+  assert.equal(ui.validateConfig(configured({ target_gateway: 'unified_15' })).target_gateway, 'unified-15');
   assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 600 })), /必须小于/);
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 30 })));
   const config = configured(); config.accounts.push({ ...config.accounts[0] });
@@ -377,10 +383,18 @@ test('780 compatibility is explicit and saved with the advanced state policy', a
   const h = uiHarness(); await settle();
   assert.equal(h.get('allow-state-780').checked, false);
   h.get('allow-state-780').checked = true;
+  h.get('route-cookie-reuse').checked = true;
+  h.get('mint-fingerprint-convergence').checked = true;
+  h.get('state-780-ttl-seconds').value = '240';
+  h.get('target-gateway').value = 'unified_88';
   await h.get('config-form').fire('change');
   await h.get('save-config').click();
   assert.equal(h.calls.save.length, 1);
   assert.equal(h.calls.save[0].allow_state_780, true);
+  assert.equal(h.calls.save[0].state_780_ttl_seconds, 240);
+  assert.equal(h.calls.save[0].target_gateway, 'unified-88');
+  assert.equal(h.calls.save[0].route_cookie_reuse, true);
+  assert.equal(h.calls.save[0].mint_fingerprint_convergence, true);
   h.runtime.stop();
 });
 

@@ -33,7 +33,11 @@
           </select>
           <p id="ticket-mode-help" class="help">固定出口适合已验证的粘性 IP；Cookie 分流允许业务使用另一个出口。</p>
           <div class="inline-switch"><label class="switch-label" for="allow-state-780"><input id="allow-state-780" type="checkbox" role="switch"><span>兼容新版 780 状态（实验）</span></label></div>
-          <p class="help">仅在无法取得 292/332 时开启。780 仍须通过业务出口复验；复验返回的新票和 Cookie 会滚动保存，返回 312、模型不一致或请求失败时仍会丢弃。</p>
+          <p class="help">仅在无法取得 292/332 时开启。780 必须携带会话 Cookie 并命中目标网关，之后持续滚动保存；返回 312、模型不一致或请求失败时仍会丢弃。</p>
+          <div class="inline-switch"><label class="switch-label" for="route-cookie-reuse"><input id="route-cookie-reuse" type="checkbox" role="switch"><span>复用上一轮网关 Cookie 打票</span></label></div>
+          <p class="help">复用 <code>__cflb/__oailb</code> 定向重打，减少落到错误网关的概率；网关 Cookie 过期或不可解析时自动回到裸打。</p>
+          <div class="inline-switch"><label class="switch-label" for="mint-fingerprint-convergence"><input id="mint-fingerprint-convergence" type="checkbox" role="switch"><span>打票指纹收敛为 codex-tui</span></label></div>
+          <p class="help">统一打票请求的客户端标识、推理参数和负载，减少同一账号被分配到不同模型指纹的概率。</p>
           <label for="upstream-proxy-url">第一层：S5/HTTP 代理地址（两种方式共用）</label>
           <div class="input-action"><input id="upstream-proxy-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="socks5h://user:pass@proxy.example:1080"><button id="toggle-upstream-proxy" type="button" class="secondary" aria-controls="upstream-proxy-url" aria-pressed="false">显示</button></div>
           <p id="upstream-proxy-help" class="help">直接粘贴完整地址，用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。官方 0.2.8 插件页不提供 IP 管理代理列表。</p>
@@ -104,6 +108,8 @@
             <div><label for="refresh-before-seconds">旧模式提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="120" required></div>
             <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="180" value="180" required></div>
             <div><label for="cookie-ticket-ttl-seconds">Cookie 票据持续期（秒）</label><input id="cookie-ticket-ttl-seconds" type="number" min="30" max="1800" value="300" required></div>
+            <div><label for="state-780-ttl-seconds">780 票据持续期（秒）</label><input id="state-780-ttl-seconds" type="number" min="30" max="1800" value="240" required></div>
+            <div><label for="target-gateway">目标网关（780）</label><input id="target-gateway" type="text" maxlength="32" value="unified-88" placeholder="unified-88" required></div>
             <div><label for="standby-lead-seconds">备用票提前时间（秒）</label><input id="standby-lead-seconds" type="number" min="10" max="600" value="90" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
             <div><label for="attempt-interval-seconds">常规重试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>

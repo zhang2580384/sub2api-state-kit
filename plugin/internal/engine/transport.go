@@ -347,18 +347,21 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 	}
 	if ticket != nil {
 		cookieMode := ticket.TicketMode == ticketModeCookie
+		sessionBound := cookieMode || ticket.SessionBound
 		// Remove differently cased map keys as well; Set alone canonicalizes only
 		// the new key and could leave a caller-supplied duplicate header intact.
 		for key := range req.Header {
 			if strings.EqualFold(key, StateHeader) || strings.EqualFold(key, "Accept-Encoding") ||
-				cookieMode && (strings.EqualFold(key, "Cookie") || strings.EqualFold(key, "session_id")) {
+				sessionBound && (strings.EqualFold(key, "Cookie") ||
+					strings.EqualFold(key, "session_id") || strings.EqualFold(key, "session-id")) {
 				delete(req.Header, key)
 			}
 		}
 		req.Header.Set(StateHeader, ticket.State)
-		if cookieMode {
+		if sessionBound {
 			if ticket.SessionID != "" {
 				req.Header.Set("session_id", ticket.SessionID)
+				req.Header.Set("session-id", ticket.SessionID)
 			}
 			if cookie := cookieHeader(ticket.Cookies); cookie != "" {
 				req.Header.Set("Cookie", cookie)
@@ -416,6 +419,8 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		}
 		e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "business",
 			UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, StateLength: len(ticket.State), StateClass: stateDiagnosticClass(ticket.State),
+			StateFingerprint: stateFingerprint(ticket.State), TicketAgeSeconds: stateAgeSeconds(ticket.State, time.Now()),
+			Gateway: ticket.Gateway, CookieFingerprint: cookieFingerprint(ticket.Cookies), SessionBound: ticket.SessionBound,
 			HTTPStatus: response.StatusCode, Outcome: outcome, DurationMS: time.Since(requestStarted).Milliseconds()})
 		if validState(response.Header.Get(StateHeader), 312) {
 			e.invalidate(ticket, "state_312")
@@ -442,6 +447,8 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 					actualModel := observer.ActualModel()
 					e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "business_result",
 						UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, StateClass: stateDiagnosticClass(ticket.State),
+						StateFingerprint: stateFingerprint(ticket.State), TicketAgeSeconds: stateAgeSeconds(ticket.State, time.Now()),
+						Gateway: ticket.Gateway, CookieFingerprint: cookieFingerprint(ticket.Cookies), SessionBound: ticket.SessionBound,
 						ResponseModel: actualModel, HTTPStatus: response.StatusCode, Outcome: "model_mismatch",
 						DurationMS: time.Since(requestStarted).Milliseconds()})
 					e.invalidate(ticket, "model_mismatch")
@@ -458,6 +465,8 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 				if ticket != nil {
 					e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "business_result",
 						UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, StateClass: stateDiagnosticClass(ticket.State),
+						StateFingerprint: stateFingerprint(ticket.State), TicketAgeSeconds: stateAgeSeconds(ticket.State, time.Now()),
+						Gateway: ticket.Gateway, CookieFingerprint: cookieFingerprint(ticket.Cookies), SessionBound: ticket.SessionBound,
 						ResponseModel: responseModel, HTTPStatus: response.StatusCode, Outcome: "upstream_read_error",
 						DurationMS: time.Since(requestStarted).Milliseconds()})
 				}
@@ -471,17 +480,23 @@ func (e *Engine) Forward(stream pluginv1.TransportPlugin_ForwardServer) error {
 		if complete, matches := observer.Result(); complete && !matches {
 			e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "business_result",
 				UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, StateClass: stateDiagnosticClass(ticket.State),
+				StateFingerprint: stateFingerprint(ticket.State), TicketAgeSeconds: stateAgeSeconds(ticket.State, time.Now()),
+				Gateway: ticket.Gateway, CookieFingerprint: cookieFingerprint(ticket.Cookies), SessionBound: ticket.SessionBound,
 				ResponseModel: observer.ActualModel(), HTTPStatus: response.StatusCode, Outcome: "model_mismatch",
 				DurationMS: time.Since(requestStarted).Milliseconds()})
 			e.invalidate(ticket, "model_mismatch")
 		} else if complete {
 			e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "business_result",
 				UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, StateClass: stateDiagnosticClass(ticket.State),
+				StateFingerprint: stateFingerprint(ticket.State), TicketAgeSeconds: stateAgeSeconds(ticket.State, time.Now()),
+				Gateway: ticket.Gateway, CookieFingerprint: cookieFingerprint(ticket.Cookies), SessionBound: ticket.SessionBound,
 				ResponseModel: observer.ActualModel(), HTTPStatus: response.StatusCode, Outcome: "model_match",
 				DurationMS: time.Since(requestStarted).Milliseconds()})
 		} else {
 			e.recordDiagnostic(diagnosticEvent{AccountID: start.AccountId, Model: model, Stage: "business_result",
 				UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, StateClass: stateDiagnosticClass(ticket.State),
+				StateFingerprint: stateFingerprint(ticket.State), TicketAgeSeconds: stateAgeSeconds(ticket.State, time.Now()),
+				Gateway: ticket.Gateway, CookieFingerprint: cookieFingerprint(ticket.Cookies), SessionBound: ticket.SessionBound,
 				ResponseModel: observer.ActualModel(), HTTPStatus: response.StatusCode, Outcome: "incomplete",
 				DurationMS: time.Since(requestStarted).Milliseconds()})
 		}
@@ -526,7 +541,7 @@ func classifyForwardTransportFailure(err error) (code, message string, requestSe
 }
 
 func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) {
-	if receipt == nil || response == nil || receipt.TicketMode != ticketModeCookie {
+	if receipt == nil || response == nil || (receipt.TicketMode != ticketModeCookie && !receipt.SessionBound) {
 		return
 	}
 	responseState := strings.TrimSpace(response.Header.Get(StateHeader))
@@ -537,13 +552,18 @@ func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) 
 	if responseState == "" && len(responseCookies) == 0 {
 		return
 	}
+	var routeAccountID int64
+	var routeSnapshot map[string]string
+	var routeTargetGateway string
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.closed || e.generation != receipt.Generation {
+		e.mu.Unlock()
 		return
 	}
 	t := e.tickets[receipt.Key]
-	if t == nil || t.Version != receipt.Version || t.ConfigFingerprint != receipt.ConfigFingerprint || t.TicketMode != ticketModeCookie {
+	if t == nil || t.Version != receipt.Version || t.ConfigFingerprint != receipt.ConfigFingerprint ||
+		(t.TicketMode != ticketModeCookie && !t.SessionBound) {
+		e.mu.Unlock()
 		return
 	}
 	if len(responseCookies) > 0 {
@@ -553,7 +573,30 @@ func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) 
 		mergeResponseCookies(t.Cookies, responseCookies)
 	}
 	if responseState != "" && validPlanState(responseState, t.Plan, e.config.AllowState780) {
+		if _, gatewayReason := routeGatewayAcceptance(responseState, t.Cookies, e.config.TargetGateway); gatewayReason != "" {
+			e.mu.Unlock()
+			return
+		}
+		now := time.Now().UTC()
 		t.State = responseState
+		t.CapturedAt = now
+		t.IssuedAt = ticketIssuedAt(responseState, now)
+		if a, ok := findAccount(e.config, t.AccountID); ok {
+			t.ExpiresAt = t.IssuedAt.Add(effectiveTicketTTLForState(e.config, a, responseState))
+		}
+		if stateRequiresSession(responseState) {
+			t.SessionBound = true
+		}
+	}
+	t.Gateway = gatewayFromCookies(t.Cookies)
+	if e.config.RouteCookieReuse {
+		routeAccountID = t.AccountID
+		routeSnapshot = cloneCookies(t.Cookies)
+		routeTargetGateway = e.config.TargetGateway
+	}
+	e.mu.Unlock()
+	if routeAccountID != 0 {
+		e.rememberRouteCookies(routeAccountID, routeSnapshot, routeTargetGateway)
 	}
 }
 
