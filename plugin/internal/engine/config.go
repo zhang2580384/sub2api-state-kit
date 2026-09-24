@@ -17,7 +17,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.3.2"
+const Version = "4.3.3"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 

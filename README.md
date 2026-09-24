@@ -1,6 +1,6 @@
 # Sub2API STATE Kit 插件
 
-本仓库维护 Sub2API `v0.2.8` 的独立 `.s2plugin` 插件，不覆盖宿主源码。`4.3.2` 增加实验性的 `780` 状态兼容，并按已成功运行样本改为滚动更新模式：业务请求返回的新 STATE 和 `__cf_bm` 会覆盖当前票据，而不是等待一张固定不变的 `292`。
+本仓库维护 Sub2API `v0.2.8` 的独立 `.s2plugin` 插件，不覆盖宿主源码。`4.3.3` 修复实时诊断监听在宿主状态请求稍慢时卡在“正在建立实时监听”的问题，并让诊断面板正确显示 `780`。`4.3.2` 已增加实验性的 `780` 状态兼容，改为滚动保存业务响应中的新 STATE 和 `__cf_bm`。
 
 ## 最短配置
 
@@ -84,6 +84,13 @@
 - 同一 `session_id` 下允许 `292` 与 `780` 按上游响应滚动切换；
 - `780` 仍必须通过业务出口复验，收到 `312`、模型不一致或请求失败时丢弃。
 
+## 4.3.3 修复内容
+
+- 实时诊断改用三次并行状态信号建立监听，不再因单次宿主响应较慢而错过监听窗口；
+- 诊断面板正确显示 `780` 票据类别；
+- 监听失败时面板直接显示宿主错误，不再长期停留在“正在建立实时监听…”；
+- 收到 `780` 后仍需触发一次实际模型请求或等待续期，监听面板才会出现新事件。
+
 ## 4.3.1 修复内容
 
 - 删除官方 Sub2API `v0.2.8` 不支持的 `proxies.list`、`accounts.list` Bridge 调用；
@@ -136,13 +143,13 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 Linux amd64 主机优先下载专用包：
 
 ```text
-sub2api-state-kit_plugin_v4.3.2_linux_amd64.s2plugin
+sub2api-state-kit_plugin_v4.3.3_linux_amd64.s2plugin
 ```
 
 需要在多个平台间复用时下载通用包：
 
 ```text
-sub2api-state-kit_plugin_v4.3.2.s2plugin
+sub2api-state-kit_plugin_v4.3.3.s2plugin
 ```
 
 `linux_amd64` 专用包只包含当前平台 runtime，体积更小；通用包包含 Linux amd64、Linux arm64 和 macOS arm64 runtime。首次安装先把 Release 中的 `trusted-publisher.yaml` 合并到宿主现有 `config.yaml`，重启一次 Sub2API，再上传 `.s2plugin`。已安装旧版时可以直接升级，配置会保留。

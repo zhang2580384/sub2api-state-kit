@@ -1,6 +1,6 @@
 # STATE Kit 插件使用指南
 
-适用于独立插件 `4.3.2` 和官方 Sub2API `v0.2.8`。插件不修改宿主源码，安装包为 `.s2plugin`。
+适用于独立插件 `4.3.3` 和官方 Sub2API `v0.2.8`。插件不修改宿主源码，安装包为 `.s2plugin`。
 
 ## 1. 先选运行方式
 
@@ -88,7 +88,7 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 1. 从 Release 下载 `trusted-publisher.yaml`，把其中公钥合并到宿主现有 `config.yaml`，不要覆盖原配置。
 2. 重启一次 Sub2API，使公钥生效。
-3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.2_linux_amd64.s2plugin`（Linux amd64 专用，体积更小）或 `sub2api-state-kit_plugin_v4.3.2.s2plugin`（包含 Linux amd64、Linux arm64 和 macOS arm64 runtime）。
+3. 在“插件管理”上传 `sub2api-state-kit_plugin_v4.3.3_linux_amd64.s2plugin`（Linux amd64 专用，体积更小）或 `sub2api-state-kit_plugin_v4.3.3.s2plugin`（包含 Linux amd64、Linux arm64 和 macOS arm64 runtime）。
 4. 确认插件已签名、受信任、已启用，灰度 `100%`。
 5. 同类 OpenAI OAuth transport 插件只启用一个。
 
@@ -110,10 +110,12 @@ proto=http&stype=txt&sessType=sticky&sessTime=180&sessAuto=0
 
 ## 6. 速度与参数
 
-`4.3.2` 在 `4.3.1` 的稳定性修复上增加 `780` 滚动兼容：
+`4.3.3` 修复诊断监听，并保留 `780` 滚动兼容：
 
 - 第一层代理直接填写，不再调用不存在的 IP 管理代理列表和账号列表 Bridge；
 - 已发现账号下拉只提供 ID，账号资料可在添加后填写；
+- 实时诊断并行发送三次状态信号，宿主响应较慢时也能进入监听状态；
+- 诊断面板显示 `780` 类别，监听失败时直接显示错误；
 - `780` 默认拒绝，只有显式打开实验开关后才进入复验；
 - 复验返回的新票和新 Cookie 会覆盖当前票据；
 - IP 与地区查询合并；

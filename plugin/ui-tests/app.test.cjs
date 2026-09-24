@@ -225,7 +225,7 @@ class Node {
   close() { this.open = false; if (this.listeners.close) return this.listeners.close(); }
 }
 
-function uiHarness() {
+function uiHarness(options = {}) {
   const elements = new Map();
   const calls = { load: 0, save: [], test: 0, status: 0, dispose: 0 };
   const timers = new Map();
@@ -237,7 +237,11 @@ function uiHarness() {
     async load() { calls.load++; return { config }; },
     async save(value) { calls.save.push(value); return { config: value }; },
     async test() { calls.test++; return { result: { message: '检查通过' } }; },
-    async status() { calls.status++; return { result: { status_json: JSON.stringify(status) } }; } };
+    async status() {
+      calls.status++;
+      const current = options.status ? await options.status(calls.status, status) : status;
+      return { result: { status_json: JSON.stringify(current) } };
+    } };
   const global = { document, Sub2APIPluginBridge: bridge, setInterval: fn => { timers.set(1, fn); return 1; }, clearInterval: id => timers.delete(id), addEventListener() {}, removeEventListener() {} };
   const runtime = ui.start(global);
   return { elements, get: document.getElementById, calls, timers, runtime, setStatus: value => { status = value; } };
@@ -450,5 +454,31 @@ test('diagnostic panel listens only while open, places newest first and clears o
   h.get('diagnostics-dialog').close();
   assert.equal(h.get('diagnostics-body').children.length, 0);
   assert.equal(h.timers.size, 0);
+  h.runtime.stop();
+});
+
+test('diagnostic panel opens the listener with parallel status signals and displays 780', async () => {
+  let slowFirst = true;
+  const h = uiHarness({
+    status: async function () {
+      if (slowFirst) {
+        slowFirst = false;
+        await new Promise(resolve => setTimeout(resolve, 30));
+      }
+      return { host_ready: true, tickets: [], diagnostics_enabled: true, diagnostics_listening: true, diagnostics: [{
+        seq: 3, time: '2026-09-24T08:00:00Z', account_id: 42, model: 'gpt-6-astra',
+        stage: 'fixed_validation', state_length: 780, state_class: '780',
+        response_model: 'gpt-6-astra', http_status: 200, outcome: 'accepted'
+      }] };
+    }
+  });
+  await settle();
+  const initialStatusCalls = h.calls.status;
+  const opening = h.get('open-diagnostics').click();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(h.calls.status, initialStatusCalls + 3);
+  await opening;
+  const cells = h.get('diagnostics-body').children[0].children;
+  assert.match(String(cells[5].textContent), /780/);
   h.runtime.stop();
 });

@@ -251,7 +251,7 @@
   }
   function normalizeDiagnostic(event) {
     if (!event || typeof event !== 'object' || Array.isArray(event)) return null;
-    const stateClasses = new Set(['292', '312', '332', 'empty', 'other']);
+    const stateClasses = new Set(['292', '312', '332', '780', 'empty', 'other']);
     const responseModel = typeof event.response_model === 'string' && MODEL_PATTERN.test(event.response_model) ? event.response_model : '';
     return {
       seq: Number.isSafeInteger(event.seq) && event.seq >= 0 ? event.seq : 0,
@@ -683,18 +683,32 @@
       finally { if (!closed) setBusy(false); }
     });
     byID('refresh-status').addEventListener('click', refreshStatus);
+    async function signalDiagnosticsListener() {
+      // The host bridge exposes no subscription call. Send the close status
+      // polls in parallel so their arrival gap stays small even when one host
+      // status request is slow.
+      const results = await Promise.allSettled([bridge.status(), bridge.status(), bridge.status()]);
+      const fulfilled = results.filter(function (entry) { return entry.status === 'fulfilled'; });
+      if (!fulfilled.length) {
+        const first = results.find(function (entry) { return entry.status === 'rejected'; });
+        throw first && first.reason || new Error('宿主状态请求失败。');
+      }
+      if (!closed) renderStatus(parseStatus(fulfilled[fulfilled.length - 1].value.result));
+    }
     async function startDiagnosticsListening() {
       diagnosticsOpen = true;
       lastDiagnostics = [];
       byID('diagnostics-summary').textContent = '正在建立实时监听…';
       renderDiagnostics();
-      await refreshStatus();
-      if (!diagnosticsOpen || closed) return;
-      // A short burst of close status polls opens the engine's listener
-      // without adding a custom host bridge method.
-      await refreshStatus();
-      if (!diagnosticsOpen || closed) return;
-      await refreshStatus();
+      try {
+        await signalDiagnosticsListener();
+      } catch (error) {
+        if (!closed) {
+          byID('diagnostics-summary').textContent = redactError(error.message);
+          notice(redactError(error.message), 'error');
+        }
+        return;
+      }
       if (!diagnosticsOpen || closed) return;
       global.clearInterval(diagnosticsTimer);
       diagnosticsTimer = global.setInterval(refreshStatus, 500);
