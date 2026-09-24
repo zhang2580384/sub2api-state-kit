@@ -17,14 +17,14 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.4.0"
+const Version = "4.5.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
 const (
 	defaultRequestTimezone = "Asia/Singapore"
 	defaultAcceptLanguage  = "en-US,en;q=0.9"
-	defaultTargetGateway   = "unified-88"
+	defaultTargetGateways  = "unified-15,unified-88,unified-180"
 	compatStateLength      = 780
 	compatStateTTLSeconds  = 240
 )
@@ -105,7 +105,7 @@ func DefaultConfig() Config {
 		ProxyGeneratorBlockedCountries: []string{"HK"},
 		ProxyGeneratorTTLMinutes:       180,
 		State780TTLSeconds:             compatStateTTLSeconds,
-		TargetGateway:                  defaultTargetGateway,
+		TargetGateway:                  defaultTargetGateways,
 		RouteCookieReuse:               true,
 		MintFingerprintConvergence:     true,
 		TicketMode:                     ticketModeLegacy,
@@ -117,7 +117,10 @@ func DefaultConfig() Config {
 	}
 }
 
-var modelPattern = regexp.MustCompile(`^gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,94}$`)
+var (
+	modelPattern        = regexp.MustCompile(`^gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,94}$`)
+	gatewayInputPattern = regexp.MustCompile(`^(?:unified[-_.]?)?(\d+)$`)
+)
 
 // ParseConfig rejects unknown fields, trailing JSON, and invalid ranges without
 // echoing user input (which can include authenticated proxy URLs).
@@ -163,11 +166,11 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	c.CookieCaptureProxyURL = strings.TrimSpace(c.CookieCaptureProxyURL)
 	c.CookieBusinessProxyURL = strings.TrimSpace(c.CookieBusinessProxyURL)
-	targetGateway, err := normalizeTargetGateway(c.TargetGateway)
+	targetGateways, err := normalizeTargetGateways(c.TargetGateway)
 	if err != nil {
 		return c, err
 	}
-	c.TargetGateway = targetGateway
+	c.TargetGateway = targetGateways
 	c.DefaultRequestTimezone = strings.TrimSpace(c.DefaultRequestTimezone)
 	if c.DefaultRequestTimezone == "" {
 		c.DefaultRequestTimezone = defaultRequestTimezone
@@ -366,17 +369,60 @@ func normalizeBlockedCountries(raw []string) ([]string, error) {
 	return result, nil
 }
 
-func normalizeTargetGateway(raw string) (string, error) {
+func normalizeTargetGateways(raw string) (string, error) {
 	value := strings.ToLower(strings.TrimSpace(raw))
 	switch value {
 	case "", "any", "*":
 		return "", nil
 	}
-	match := gatewayNumberPattern.FindStringSubmatch(value)
-	if len(match) != 2 || match[0] != value {
-		return "", errors.New("target_gateway must be any or unified-N")
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	})
+	if len(parts) == 0 || len(parts) > 32 {
+		return "", errors.New("target_gateway must contain 1..32 gateway IDs")
 	}
-	return "unified-" + match[1], nil
+	seen := map[string]bool{}
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "any" || part == "*" {
+			return "", errors.New("target_gateway cannot mix any with gateway IDs")
+		}
+		match := gatewayInputPattern.FindStringSubmatch(part)
+		if len(match) != 2 {
+			return "", errors.New("target_gateway must be any or comma-separated unified-N IDs")
+		}
+		gateway := "unified-" + match[1]
+		if !seen[gateway] {
+			seen[gateway] = true
+			result = append(result, gateway)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, _ := strconv.Atoi(strings.TrimPrefix(result[i], "unified-"))
+		right, _ := strconv.Atoi(strings.TrimPrefix(result[j], "unified-"))
+		return left < right
+	})
+	return strings.Join(result, ","), nil
+}
+
+func targetGatewayList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+func gatewayAllowed(gateway string, targetGateways string) bool {
+	targets := targetGatewayList(targetGateways)
+	if len(targets) == 0 {
+		return true
+	}
+	for _, target := range targets {
+		if gateway == target {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeAccountDisplayFields(a *AccountConfig) error {
@@ -497,7 +543,7 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v9", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+	return digest("v10", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
 		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
 		c.TicketMode, c.CookieCaptureMode, c.CookieCaptureProxyURL, c.CookieBusinessProxyURL,
 		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),

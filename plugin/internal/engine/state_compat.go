@@ -152,9 +152,9 @@ func stateAgeSeconds(state string, now time.Time) int64 {
 	return int64(age / time.Second)
 }
 
-func routeGatewayAcceptance(state string, cookies map[string]string, targetGateway string) (string, string) {
+func routeGatewayAcceptance(state string, cookies map[string]string, targetGateways string) (string, string) {
 	gateway := gatewayFromCookies(cookies)
-	if !stateRequiresSession(state) || targetGateway == "" {
+	if !stateRequiresSession(state) || strings.TrimSpace(targetGateways) == "" {
 		return gateway, ""
 	}
 	if len(routeCookies(cookies)) == 0 {
@@ -163,13 +163,13 @@ func routeGatewayAcceptance(state string, cookies map[string]string, targetGatew
 	if gateway == "" {
 		return "", "gateway_unknown"
 	}
-	if gateway != targetGateway {
+	if !gatewayAllowed(gateway, targetGateways) {
 		return gateway, "gateway_mismatch"
 	}
 	return gateway, ""
 }
 
-func (e *Engine) preferredRouteCookies(accountID int64, targetGateway string) map[string]string {
+func (e *Engine) preferredRouteCookies(accountID int64, targetGateways string) map[string]string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	session, ok := e.routeSessions[accountID]
@@ -180,20 +180,20 @@ func (e *Engine) preferredRouteCookies(accountID int64, targetGateway string) ma
 		delete(e.routeSessions, accountID)
 		return nil
 	}
-	if targetGateway != "" && session.Gateway != targetGateway {
+	if !gatewayAllowed(session.Gateway, targetGateways) {
 		delete(e.routeSessions, accountID)
 		return nil
 	}
 	return cloneCookies(session.Cookies)
 }
 
-func (e *Engine) rememberRouteCookies(accountID int64, cookies map[string]string, targetGateway string) {
+func (e *Engine) rememberRouteCookies(accountID int64, cookies map[string]string, targetGateways string) {
 	routes := routeCookies(cookies)
 	if len(routes) == 0 {
 		return
 	}
 	gateway := gatewayFromCookies(routes)
-	if targetGateway != "" && gateway != targetGateway {
+	if !gatewayAllowed(gateway, targetGateways) {
 		return
 	}
 	now := time.Now().UTC()

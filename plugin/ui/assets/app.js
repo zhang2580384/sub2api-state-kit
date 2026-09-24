@@ -7,7 +7,7 @@
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
-    allow_state_780: false, state_780_ttl_seconds: 240, target_gateway: 'unified-88',
+    allow_state_780: false, state_780_ttl_seconds: 240, target_gateway: 'unified-15,unified-88,unified-180',
     route_cookie_reuse: true, mint_fingerprint_convergence: true,
     ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
     cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
@@ -143,12 +143,21 @@
     if (!seen.has('HK')) countries.push('HK');
     return countries.sort();
   }
-  function normalizeTargetGateway(value) {
-    const raw = String(value || '').trim().toLowerCase();
+  function normalizeTargetGateways(value) {
+    const raw = (Array.isArray(value) ? value.join(',') : String(value || '')).trim().toLowerCase();
     if (raw === '' || raw === 'any' || raw === '*') return '';
-    const match = /^unified[-_.]?(\d+)$/.exec(raw);
-    if (!match) throw new Error('目标网关须填写 any 或 unified-N。');
-    return 'unified-' + match[1];
+    const parts = raw.split(/[,;\s]+/).filter(Boolean);
+    if (!parts.length || parts.length > 32) throw new Error('目标网关须填写 1–32 个网关，用英文逗号分隔。');
+    const gateways = new Set();
+    parts.forEach(function (part) {
+      if (part === 'any' || part === '*') throw new Error('目标网关填 any 时不能同时填写编号。');
+      const match = /^(?:unified[-_.]?)?(\d+)$/.exec(part);
+      if (!match) throw new Error('目标网关须填写 any，或用英文逗号分隔多个网关编号。');
+      gateways.add('unified-' + Number(match[1]));
+    });
+    return Array.from(gateways).sort(function (a, b) {
+      return Number(a.slice('unified-'.length)) - Number(b.slice('unified-'.length));
+    }).join(',');
   }
   function normalizeConfig(input) {
     const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
@@ -184,7 +193,7 @@
     if (typeof config.allow_state_780 !== 'boolean') throw new Error('780 状态兼容开关格式不正确。');
     if (typeof config.route_cookie_reuse !== 'boolean') throw new Error('网关 Cookie 复用开关格式不正确。');
     if (typeof config.mint_fingerprint_convergence !== 'boolean') throw new Error('打票指纹收敛开关格式不正确。');
-    config.target_gateway = normalizeTargetGateway(config.target_gateway);
+    config.target_gateway = normalizeTargetGateways(config.target_gateway);
     if (typeof config.request_rewrite_enabled !== 'boolean') throw new Error('请求环境替换开关格式不正确。');
     config.default_request_timezone = validateTimezone(config.default_request_timezone, '默认请求时区');
     if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('运行方式须选择稳定同出口或 Cookie 分流。');
@@ -264,6 +273,23 @@
       generator_failed: '生成器调用失败', egress_unavailable: '出口不可用', region_blocked: '地区被阻止',
       egress_changed: '出口 IP 不一致', session_incomplete: '会话不完整',
       gateway_unavailable: '未取得目标网关', gateway_unknown: '网关无法识别', gateway_mismatch: '网关不匹配' })[outcome] || '未知结果';
+  }
+  function diagnosticGatewayStats(events) {
+    const stats = new Map();
+    (Array.isArray(events) ? events : []).forEach(function (event) {
+      const gateway = event && typeof event.gateway === 'string' ? event.gateway : '';
+      if (!/^unified-\d+$/.test(gateway)) return;
+      const item = stats.get(gateway) || { gateway: gateway, total: 0, passed: 0, rejected: 0, modelMismatch: 0 };
+      item.total += 1;
+      if (event.outcome === 'accepted' || event.outcome === 'model_match') item.passed += 1;
+      if (event.outcome === 'model_mismatch') item.modelMismatch += 1;
+      if (['gateway_mismatch', 'gateway_unavailable', 'gateway_unknown', 'validation_failed',
+        'state_312', 'unexpected_state'].includes(event.outcome)) item.rejected += 1;
+      stats.set(gateway, item);
+    });
+    return Array.from(stats.values()).sort(function (a, b) {
+      return b.total - a.total || Number(a.gateway.slice(8)) - Number(b.gateway.slice(8));
+    });
   }
   function safeDiagnosticText(value, max) {
     if (typeof value !== 'string') return '';
@@ -550,7 +576,7 @@
         allow_state_780: byID('allow-state-780').checked,
         route_cookie_reuse: byID('route-cookie-reuse').checked,
         mint_fingerprint_convergence: byID('mint-fingerprint-convergence').checked,
-        target_gateway: normalizeTargetGateway(byID('target-gateway').value),
+        target_gateway: normalizeTargetGateways(byID('target-gateway').value),
         request_rewrite_enabled: byID('request-rewrite-enabled').checked,
         default_request_timezone: byID('default-request-timezone').value.trim()
       };
@@ -602,7 +628,9 @@
     }
     function renderDiagnostics() {
       const body = byID('diagnostics-body');
+      const gatewaySummary = byID('diagnostics-gateways');
       body.replaceChildren();
+      gatewaySummary.replaceChildren();
       lastDiagnostics.slice().reverse().forEach(function (event) {
         const row = element('tr');
         row.appendChild(element('td', event.time ? new Date(event.time).toLocaleString('zh-CN') : '—'));
@@ -631,6 +659,14 @@
         row.appendChild(element('td', event.duration_ms ? event.duration_ms + ' ms' : '—'));
         body.appendChild(row);
       });
+      const gatewayStats = diagnosticGatewayStats(lastDiagnostics);
+      gatewayStats.slice(0, 8).forEach(function (stat) {
+        const parts = [stat.gateway, '出现 ' + stat.total, '通过 ' + stat.passed];
+        if (stat.modelMismatch) parts.push('模型不符 ' + stat.modelMismatch);
+        if (stat.rejected) parts.push('拒绝 ' + stat.rejected);
+        gatewaySummary.appendChild(element('span', parts.join(' · '), 'diagnostic-gateway-stat'));
+      });
+      gatewaySummary.hidden = gatewayStats.length === 0;
       byID('diagnostics-empty').hidden = lastDiagnostics.length !== 0;
       if (!diagnosticsOpen) {
         byID('diagnostics-summary').textContent = '打开面板后开始实时监听，不保存日志。';
@@ -817,5 +853,6 @@
     validateTimezone: validateTimezone,
     accountID: accountID, accountOptionLabel: accountOptionLabel, normalizeAccountCatalog: normalizeAccountCatalog,
     parseStatus: parseStatus, stateLabel: stateLabel, errorLabel: errorLabel, redactError: redactError, remainingText: remainingText,
-    diagnosticStageLabel: diagnosticStageLabel, diagnosticOutcomeLabel: diagnosticOutcomeLabel, start: start };
+    diagnosticStageLabel: diagnosticStageLabel, diagnosticOutcomeLabel: diagnosticOutcomeLabel,
+    diagnosticGatewayStats: diagnosticGatewayStats, start: start };
 });

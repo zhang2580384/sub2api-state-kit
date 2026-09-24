@@ -5,11 +5,12 @@ Sub2API v0.2.8 的开源 OpenAI OAuth transport 插件，提供逐账号 Pro / T
 请先阅读 [安装与使用说明](../docs/plugin.md)。配置在「插件管理 → STATE Kit → 配置」，不用修改宿主源码。首次安装需在宿主信任本插件的发布者公钥。
 
 - 插件 ID：`io.github.wangyunjeff.sub2api-state-kit`
-- 插件版本：`4.4.0`
+- 插件版本：`4.5.0`
 - 运行方式：稳定同出口保持打票、复验、业务出口一致；Cookie 分流允许采集和业务出口分离
 - Cookie 打票：支持代理生成器 API 或 `http`、`https`、`socks5`、`socks5h` 固定采集代理
 - 会话完整性：Cookie 模式必须同时具有 STATE、`session_id` 和至少一个响应 Cookie
-- `780` 定向：默认只接受 `unified-88`，要求 `__cflb/__oailb` 路由对并按其 Fernet 签发时间维持约 `240` 秒；
+- `780` 定向：目标网关支持多选，默认白名单为 `unified-15,unified-88,unified-180`，要求 `__cflb/__oailb` 路由对并按其 Fernet 签发时间维持约 `240` 秒；
+- 网关诊断：实时汇总各网关的出现、通过、模型不符和拒绝次数；
 - 打票指纹：默认收敛为参考实现验证过的 `codex-tui` 请求形态；
 - 持续期与备用票：两种运行方式都可提前准备备用票；新票复验成功前不替换当前票
 - 账号显示：已发现账号下拉显示 ID；名称、邮箱、到期时间和额度可在添加后填写并保存

@@ -48,6 +48,23 @@
   margin-top: 4px;
 }
 
+.diagnostic-gateways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.diagnostic-gateway-stat {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--soft);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
 @media (max-width: 680px) {
   .sr-only {
     left: 0;

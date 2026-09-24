@@ -109,13 +109,13 @@
             <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="180" value="180" required></div>
             <div><label for="cookie-ticket-ttl-seconds">Cookie 票据持续期（秒）</label><input id="cookie-ticket-ttl-seconds" type="number" min="30" max="1800" value="300" required></div>
             <div><label for="state-780-ttl-seconds">780 票据持续期（秒）</label><input id="state-780-ttl-seconds" type="number" min="30" max="1800" value="240" required></div>
-            <div><label for="target-gateway">目标网关（780）</label><input id="target-gateway" type="text" maxlength="32" value="unified-88" placeholder="unified-88" required></div>
+            <div><label for="target-gateway">目标网关（可多选）</label><input id="target-gateway" type="text" maxlength="256" value="unified-15,unified-88,unified-180" placeholder="15,88,180" required></div>
             <div><label for="standby-lead-seconds">备用票提前时间（秒）</label><input id="standby-lead-seconds" type="number" min="10" max="600" value="90" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
             <div><label for="attempt-interval-seconds">常规重试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>
           </div>
-          <p class="help">生成出口被地区过滤时会立即换出口，不等待常规重试间隔。新票通过业务出口复验并保存成功后才进入可用状态；复验响应中的新票和 Cookie 会滚动更新，续期期间旧票继续服务。</p>
+          <p class="help">目标网关支持网关号或 <code>unified-N</code>，用英文逗号分隔；填 <code>any</code> 才关闭网关白名单。生成出口被地区过滤时会立即换出口，不等待常规重试间隔。新票通过业务出口复验并保存成功后才进入可用状态；复验响应中的新票和 Cookie 会滚动更新，续期期间旧票继续服务。</p>
         </details>
       </fieldset>
 
@@ -135,6 +135,7 @@
       <div><h2 id="diagnostics-title">实时诊断监听</h2><p id="diagnostics-summary" class="muted">打开面板后开始实时监听，不保存日志。</p></div>
       <div class="actions"><button id="diagnostics-refresh" type="button" class="secondary">刷新</button><button id="diagnostics-copy" type="button" class="secondary">复制</button><button id="diagnostics-close" type="button" class="secondary">关闭</button></div>
     </div>
+    <div id="diagnostics-gateways" class="diagnostic-gateways" hidden></div>
     <div class="table-wrap diagnostics-table"><table><thead><tr><th scope="col">时间</th><th scope="col">账号 / 模型</th><th scope="col">阶段</th><th scope="col">代理链</th><th scope="col">出口 IP</th><th scope="col">状态</th><th scope="col">响应</th><th scope="col">结果</th><th scope="col">耗时</th></tr></thead><tbody id="diagnostics-body"></tbody></table></div>
     <p id="diagnostics-empty" class="empty">正在等待新事件；关闭面板即停止监听。</p>
   </dialog>

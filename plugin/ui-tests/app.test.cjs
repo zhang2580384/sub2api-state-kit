@@ -18,7 +18,7 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
   assert.equal(ui.normalizeConfig({}).allow_state_780, false);
   assert.equal(ui.normalizeConfig({}).state_780_ttl_seconds, 240);
-  assert.equal(ui.normalizeConfig({}).target_gateway, 'unified-88');
+  assert.equal(ui.normalizeConfig({}).target_gateway, 'unified-15,unified-88,unified-180');
   assert.equal(ui.normalizeConfig({}).route_cookie_reuse, true);
   assert.equal(ui.normalizeConfig({}).mint_fingerprint_convergence, true);
   assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
@@ -150,7 +150,9 @@ test('validates bounds, renewal horizon, duplicate accounts and model allowlist'
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 180, refresh_before_seconds: 120, proxy_generator_ttl_minutes: 180 })));
   assert.throws(() => ui.validateConfig(configured({ cooldown_seconds: 29 })), /30–3600/);
   assert.throws(() => ui.validateConfig(configured({ target_gateway: 'unified-abc' })), /目标网关/);
-  assert.equal(ui.validateConfig(configured({ target_gateway: 'unified_15' })).target_gateway, 'unified-15');
+  assert.throws(() => ui.validateConfig(configured({ target_gateway: 'any,unified-88' })), /不能同时/);
+  assert.equal(ui.validateConfig(configured({ target_gateway: '88, 180,15,unified_88' })).target_gateway,
+    'unified-15,unified-88,unified-180');
   assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 600 })), /必须小于/);
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 30 })));
   const config = configured(); config.accounts.push({ ...config.accounts[0] });
@@ -214,6 +216,17 @@ test('diagnostic events expose state classes and egress evidence without credent
   assert.equal(JSON.stringify(parsed).includes('gAAAAA-secret-state'), false);
   assert.equal(ui.diagnosticStageLabel('capture'), '采集票据');
   assert.equal(ui.diagnosticOutcomeLabel('state_312'), '收到 312');
+  assert.deepEqual(ui.diagnosticGatewayStats([
+    { gateway: 'unified-15', outcome: 'accepted' },
+    { gateway: 'unified-15', outcome: 'model_match' },
+    { gateway: 'unified-180', outcome: 'model_mismatch' },
+    { gateway: 'unified-12', outcome: 'gateway_mismatch' },
+    { gateway: 'not-a-gateway', outcome: 'accepted' }
+  ]), [
+    { gateway: 'unified-15', total: 2, passed: 2, rejected: 0, modelMismatch: 0 },
+    { gateway: 'unified-12', total: 1, passed: 0, rejected: 1, modelMismatch: 0 },
+    { gateway: 'unified-180', total: 1, passed: 0, rejected: 0, modelMismatch: 1 }
+  ]);
 });
 
 class Node {
@@ -386,13 +399,13 @@ test('780 compatibility is explicit and saved with the advanced state policy', a
   h.get('route-cookie-reuse').checked = true;
   h.get('mint-fingerprint-convergence').checked = true;
   h.get('state-780-ttl-seconds').value = '240';
-  h.get('target-gateway').value = 'unified_88';
+  h.get('target-gateway').value = '88, 180,15';
   await h.get('config-form').fire('change');
   await h.get('save-config').click();
   assert.equal(h.calls.save.length, 1);
   assert.equal(h.calls.save[0].allow_state_780, true);
   assert.equal(h.calls.save[0].state_780_ttl_seconds, 240);
-  assert.equal(h.calls.save[0].target_gateway, 'unified-88');
+  assert.equal(h.calls.save[0].target_gateway, 'unified-15,unified-88,unified-180');
   assert.equal(h.calls.save[0].route_cookie_reuse, true);
   assert.equal(h.calls.save[0].mint_fingerprint_convergence, true);
   h.runtime.stop();
@@ -448,7 +461,8 @@ test('diagnostic panel listens only while open, places newest first and clears o
   }, {
     seq: 2, time: '2026-09-21T12:00:01Z', account_id: 20, model: 'gpt-6-astra', stage: 'capture',
     target_proxy: 'socks5://user:secret@capture.example:1081', capture_egress: '203.0.113.19',
-    state_length: 292, state_class: '292', response_model: 'gpt-6-astra', http_status: 200, outcome: 'accepted', duration_ms: 55
+    state_length: 780, state_class: '780', gateway: 'unified-15', response_model: 'gpt-6-astra', http_status: 200,
+    outcome: 'accepted', duration_ms: 55
   }] });
   await h.get('open-diagnostics').click();
   assert.equal(h.calls.status >= 3, true);
@@ -464,6 +478,7 @@ test('diagnostic panel listens only while open, places newest first and clears o
   assert.match(rendered, /出口不一致/);
   assert.match(rendered, /312 · 312/);
   assert.match(rendered, /gpt-5\.6-luna/);
+  assert.match(text(h.get('diagnostics-gateways')), /unified-15 · 出现 1 · 通过 1/);
   assert.equal(rendered.includes('secret'), false);
   h.get('diagnostics-dialog').close();
   assert.equal(h.get('diagnostics-body').children.length, 0);
