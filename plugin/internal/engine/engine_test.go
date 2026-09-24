@@ -141,10 +141,11 @@ func testStart(id int64) *pluginv1.ForwardRequestStart {
 func TestConfigStrictIsolation(t *testing.T) {
 	c, err := ParseConfig([]byte(`{}`))
 	if err != nil || c.Enabled || c.TTLMinutes != 180 || c.RefreshBeforeSeconds != 120 || c.PreferPreviousIP ||
-		c.TargetGateway != "unified-15,unified-88,unified-180" || !c.RouteCookieReuse || !c.MintFingerprintConvergence || len(c.Accounts) != 0 {
+		c.GatewayPolicy != gatewayPolicyAllow || c.TargetGateway != "unified-15,unified-88,unified-180" ||
+		!c.RouteCookieReuse || !c.MintFingerprintConvergence || len(c.Accounts) != 0 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
-	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"proxy_generator_ttl_minutes":181}`, `{"target_gateway":"unified-abc"}`, `{"target_gateway":"https://gateway.example"}`, `{"target_gateway":"any,unified-88"}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
+	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"proxy_generator_ttl_minutes":181}`, `{"target_gateway":"unified-abc"}`, `{"target_gateway":"https://gateway.example"}`, `{"target_gateway":"any,unified-88"}`, `{"gateway_policy":"blocked"}`, `{"gateway_policy":"allow","target_gateway":"any"}`, `{"gateway_policy":"deny","target_gateway":""}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
 	for _, raw := range bad {
 		if _, err := ParseConfig([]byte(raw)); err == nil {
 			t.Errorf("accepted invalid config %s", raw)
@@ -184,12 +185,20 @@ func TestConfigStrictIsolation(t *testing.T) {
 		t.Fatalf("previous egress preference not parsed: %+v %v", prefer, err)
 	}
 	gateway, err := ParseConfig([]byte(`{"target_gateway":"88, 180,15,unified_88"}`))
-	if err != nil || gateway.TargetGateway != "unified-15,unified-88,unified-180" {
+	if err != nil || gateway.GatewayPolicy != gatewayPolicyAllow || gateway.TargetGateway != "unified-15,unified-88,unified-180" {
 		t.Fatalf("target gateways were not normalized: %+v %v", gateway, err)
 	}
 	anyGateway, err := ParseConfig([]byte(`{"target_gateway":"any"}`))
-	if err != nil || anyGateway.TargetGateway != "" {
+	if err != nil || anyGateway.GatewayPolicy != gatewayPolicyAny || anyGateway.TargetGateway != "" {
 		t.Fatalf("any target gateway was not normalized: %+v %v", anyGateway, err)
+	}
+	denyGateway, err := ParseConfig([]byte(`{"gateway_policy":"deny","target_gateway":"88,180"}`))
+	if err != nil || denyGateway.GatewayPolicy != gatewayPolicyDeny || denyGateway.TargetGateway != "unified-88,unified-180" {
+		t.Fatalf("deny gateway policy was not normalized: %+v %v", denyGateway, err)
+	}
+	anyPolicy, err := ParseConfig([]byte(`{"gateway_policy":"any","target_gateway":"unified-88"}`))
+	if err != nil || anyPolicy.GatewayPolicy != gatewayPolicyAny || anyPolicy.TargetGateway != "" {
+		t.Fatalf("explicit any gateway policy was not normalized: %+v %v", anyPolicy, err)
 	}
 }
 
@@ -446,6 +455,34 @@ func TestState780RejectsOffTargetGatewayBeforeBusinessValidation(t *testing.T) {
 	waitFor(t, e, "cooldown")
 	if businessCalls.Load() != 0 {
 		t.Fatalf("off-target 780 reached business validation %d times", businessCalls.Load())
+	}
+}
+
+func TestState780DenyPolicyAllowsUnlistedGateway(t *testing.T) {
+	h := testHost(42)
+	pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__cflb", Value: "lb-test"})
+		http.SetCookie(w, &http.Cookie{Name: "__oailb", Value: "unified-15"})
+		w.Header().Set(StateHeader, testState(780))
+		completed(w, "gpt-6-astra")
+	}))
+	defer pool.Close()
+	var businessCalls atomic.Int32
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		businessCalls.Add(1)
+		completed(w, "gpt-6-astra")
+	}))
+	defer business.Close()
+
+	e := testEngine(t, h, business.URL)
+	c := testConfig(pool.URL, 42)
+	c.AllowState780 = true
+	c.GatewayPolicy = gatewayPolicyDeny
+	c.TargetGateway = "unified-88"
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+	if businessCalls.Load() == 0 {
+		t.Fatal("unlisted 780 gateway did not reach business validation under deny policy")
 	}
 }
 

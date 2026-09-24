@@ -124,6 +124,7 @@ type statusSnapshot struct {
 	Tickets              []statusTicket    `json:"tickets"`
 	DiagnosticsEnabled   bool              `json:"diagnostics_enabled"`
 	DiagnosticsListening bool              `json:"diagnostics_listening"`
+	DiagnosticsRetained  int               `json:"diagnostics_retained,omitempty"`
 	Diagnostics          []diagnosticEvent `json:"diagnostics,omitempty"`
 	Message              string            `json:"message"`
 }
@@ -259,7 +260,6 @@ func (e *Engine) ApplyConfig(_ context.Context, r *pluginv1.ApplyConfigRequest) 
 	e.activeAfter = time.Now().Add(e.warmup)
 	e.jobs = map[string]uint64{}
 	e.records = map[string]*jobRecord{}
-	e.diagnostics = nil
 	// Remove memory entries no longer matching configuration. Persisted entries are
 	// keyed by fingerprint and expire naturally; switching configuration cannot use them.
 	for k, t := range e.tickets {
@@ -548,9 +548,12 @@ func (e *Engine) notify() {
 }
 func (e *Engine) snapshotLocked(now time.Time) statusSnapshot {
 	listening := e.diagnosticsListeningLocked(now)
-	s := statusSnapshot{HostReady: e.hostReady, AccountIDs: []int64{}, AccountCatalog: []statusAccount{}, Tickets: []statusTicket{}, DiagnosticsEnabled: listening, DiagnosticsListening: listening, Message: "STATE disabled; requests use the account business proxy"}
-	if listening && len(e.diagnostics) > 0 {
-		s.Diagnostics = append([]diagnosticEvent(nil), e.diagnostics...)
+	e.pruneDiagnosticsLocked(now)
+	s := statusSnapshot{HostReady: e.hostReady, AccountIDs: []int64{}, AccountCatalog: []statusAccount{}, Tickets: []statusTicket{}, DiagnosticsEnabled: true, DiagnosticsListening: listening, Message: "STATE disabled; requests use the account business proxy"}
+	if len(e.diagnostics) > 0 {
+		s.DiagnosticsRetained = len(e.diagnostics)
+		start := max(0, len(e.diagnostics)-maxDiagnosticResponseEvents)
+		s.Diagnostics = append([]diagnosticEvent(nil), e.diagnostics[start:]...)
 	}
 	for id := range e.directory {
 		s.AccountIDs = append(s.AccountIDs, id)

@@ -337,13 +337,13 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		sessionID := randomID()
 		cookies := map[string]string{}
 		if c.RouteCookieReuse {
-			cookies = e.preferredRouteCookies(a.AccountID, c.TargetGateway)
+			cookies = e.preferredRouteCookies(a.AccountID, c.GatewayPolicy, c.TargetGateway)
 		}
 		captureResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "", sessionID, cookies, c.MintFingerprintConvergence)
 		candidate, status, captureModel := captureResult.State, captureResult.Status, captureResult.Model
 		cookies = captureResult.Cookies
 		if c.RouteCookieReuse {
-			e.rememberRouteCookies(a.AccountID, cookies, c.TargetGateway)
+			e.rememberRouteCookies(a.AccountID, cookies, c.GatewayPolicy, c.TargetGateway)
 		}
 		if !generatorMode && !cookieMode {
 			captureEgress = e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
@@ -371,7 +371,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			e.recordDiagnostic(captureEvent)
 			continue
 		}
-		if _, gatewayReason := routeGatewayAcceptance(candidate, cookies, c.TargetGateway); gatewayReason != "" {
+		if _, gatewayReason := routeGatewayAcceptance(candidate, cookies, c.GatewayPolicy, c.TargetGateway); gatewayReason != "" {
 			reason = gatewayReason
 			captureEvent.Outcome = gatewayReason
 			captureEvent.Error = gatewayReason
@@ -452,7 +452,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		returned, status, validationModel := validationResult.State, validationResult.Status, validationResult.Model
 		cookies = validationResult.Cookies
 		if c.RouteCookieReuse {
-			e.rememberRouteCookies(a.AccountID, cookies, c.TargetGateway)
+			e.rememberRouteCookies(a.AccountID, cookies, c.GatewayPolicy, c.TargetGateway)
 		}
 		validationEvent.StateLength = len(returned)
 		validationEvent.StateClass = stateDiagnosticClass(returned)
@@ -489,7 +489,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			}
 			validatedState = returned
 		}
-		gateway, gatewayReason := routeGatewayAcceptance(validatedState, cookies, c.TargetGateway)
+		gateway, gatewayReason := routeGatewayAcceptance(validatedState, cookies, c.GatewayPolicy, c.TargetGateway)
 		if gatewayReason != "" {
 			reason = gatewayReason
 			validationEvent.Outcome = gatewayReason
@@ -699,7 +699,7 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 	t.Gateway = gatewayFromCookies(t.Cookies)
 	t.BusinessEgressIP = fixedEgress
 	if c.RouteCookieReuse {
-		e.rememberRouteCookies(a.AccountID, t.Cookies, c.TargetGateway)
+		e.rememberRouteCookies(a.AccountID, t.Cookies, c.GatewayPolicy, c.TargetGateway)
 	}
 	if (c.TicketMode == ticketModeCookie || t.SessionBound) && (t.SessionID == "" || len(t.Cookies) == 0) {
 		event.Outcome = "session_incomplete"
@@ -707,7 +707,7 @@ func (e *Engine) restore(ctx context.Context, host pluginv1.HostServiceClient, c
 		e.recordDiagnostic(event)
 		return false, status
 	}
-	if _, gatewayReason := routeGatewayAcceptance(t.State, t.Cookies, c.TargetGateway); gatewayReason != "" {
+	if _, gatewayReason := routeGatewayAcceptance(t.State, t.Cookies, c.GatewayPolicy, c.TargetGateway); gatewayReason != "" {
 		event.Outcome = gatewayReason
 		event.Error = gatewayReason
 		e.recordDiagnostic(event)

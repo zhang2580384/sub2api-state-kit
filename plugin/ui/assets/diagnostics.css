@@ -3,15 +3,25 @@
 }
 
 .diagnostic-dialog {
-  width: min(1180px, calc(100vw - 32px));
-  max-width: 1180px;
-  max-height: calc(100vh - 32px);
-  padding: 20px;
+  position: fixed;
+  inset: auto;
+  display: none;
+  width: min(1440px, calc(100vw - 24px));
+  height: min(900px, calc(100vh - 24px));
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface);
   color: var(--text);
-  overflow: auto;
+  overflow: hidden;
+}
+
+.diagnostic-dialog[open] {
+  display: flex;
+  flex-direction: column;
 }
 
 .diagnostic-dialog::backdrop {
@@ -19,26 +29,105 @@
 }
 
 .diagnostics-head {
+  flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.diagnostics-drag-handle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.diagnostics-drag-handle:active {
+  cursor: grabbing;
+}
+
+.diagnostics-drag-grip {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 30px;
+  border-radius: 999px;
+  background: repeating-linear-gradient(to bottom, var(--muted) 0 2px, transparent 2px 6px);
+  opacity: 0.65;
+}
+
+.diagnostics-head h2 {
+  margin-bottom: 2px;
+}
+
+.diagnostics-gateways-panel {
+  flex: 0 0 auto;
+  max-height: 190px;
+  padding: 12px 18px 14px;
+  overflow: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+}
+
+.diagnostic-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+  font-size: 12px;
+}
+
+.diagnostic-section-head span {
+  color: var(--muted);
+}
+
+.diagnostic-gateways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostic-gateway-stat {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
 }
 
 .diagnostics-table {
-  max-height: calc(100vh - 190px);
-  margin-top: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  border-bottom: 1px solid var(--line);
+}
+
+.diagnostics-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
 }
 
 .diagnostics-table table {
-  min-width: 1280px;
+  min-width: 1520px;
 }
 
 .diagnostic-mono {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   white-space: pre-line;
-  max-width: 260px;
+  max-width: 280px;
   overflow-wrap: anywhere;
 }
 
@@ -48,40 +137,45 @@
   margin-top: 4px;
 }
 
-.diagnostic-gateways {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.diagnostic-gateway-stat {
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--soft);
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
+#diagnostics-empty {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 18px 12px;
+  text-align: left;
 }
 
 @media (max-width: 680px) {
-  .sr-only {
-    left: 0;
+  .diagnostic-dialog {
+    width: calc(100vw - 12px);
+    height: calc(100vh - 12px);
   }
 
   .diagnostics-head {
-    align-items: stretch;
+    align-items: flex-start;
     flex-direction: column;
+    padding: 12px;
   }
 
-  .diagnostic-dialog {
-    width: calc(100vw - 16px);
-    max-height: calc(100vh - 16px);
-    padding: 14px;
+  .diagnostics-head .actions {
+    width: 100%;
   }
 
-  .diagnostics-table {
-    max-height: calc(100vh - 180px);
+  .diagnostics-head .actions button {
+    flex: 1;
+  }
+
+  .diagnostics-drag-handle {
+    width: 100%;
+  }
+
+  .diagnostics-gateways-panel {
+    max-height: 150px;
+    padding: 10px 12px 12px;
+  }
+
+  .diagnostic-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
   }
 }

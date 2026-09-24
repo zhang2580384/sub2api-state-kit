@@ -17,7 +17,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.5.0"
+const Version = "4.5.1"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -41,6 +41,12 @@ const (
 )
 
 const (
+	gatewayPolicyAllow = "allow"
+	gatewayPolicyDeny  = "deny"
+	gatewayPolicyAny   = "any"
+)
+
+const (
 	captureModeGenerator = "generator"
 	captureModeSOCKS5    = "socks5"
 )
@@ -57,6 +63,7 @@ type Config struct {
 	PreferPreviousIP               bool     `json:"prefer_previous_ip"`
 	AllowState780                  bool     `json:"allow_state_780"`
 	State780TTLSeconds             int      `json:"state_780_ttl_seconds"`
+	GatewayPolicy                  string   `json:"gateway_policy"`
 	TargetGateway                  string   `json:"target_gateway"`
 	RouteCookieReuse               bool     `json:"route_cookie_reuse"`
 	MintFingerprintConvergence     bool     `json:"mint_fingerprint_convergence"`
@@ -70,8 +77,8 @@ type Config struct {
 	RequestRewriteEnabled          bool     `json:"request_rewrite_enabled"`
 	DefaultRequestTimezone         string   `json:"default_request_timezone"`
 	// DiagnosticLogEnabled is retained only so configurations saved by v0.3.6
-	// remain loadable. Diagnostics are now a UI-scoped live listener and the
-	// value is intentionally ignored.
+	// remain loadable. Diagnostics now use fixed five-hour in-memory retention
+	// and the value is intentionally ignored.
 	DiagnosticLogEnabled   bool            `json:"diagnostic_log_enabled,omitempty"`
 	TTLMinutes             int             `json:"ttl_minutes"`
 	RefreshBeforeSeconds   int             `json:"refresh_before_seconds"`
@@ -105,6 +112,7 @@ func DefaultConfig() Config {
 		ProxyGeneratorBlockedCountries: []string{"HK"},
 		ProxyGeneratorTTLMinutes:       180,
 		State780TTLSeconds:             compatStateTTLSeconds,
+		GatewayPolicy:                  gatewayPolicyAllow,
 		TargetGateway:                  defaultTargetGateways,
 		RouteCookieReuse:               true,
 		MintFingerprintConvergence:     true,
@@ -144,6 +152,8 @@ func ParseConfig(raw []byte) (Config, error) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return c, errors.New("invalid configuration JSON")
 	}
+	_, hasGatewayPolicy := fields["gateway_policy"]
+	_, hasTargetGateway := fields["target_gateway"]
 	_, hasSeconds := fields["refresh_before_seconds"]
 	_, hasMinutes := fields["refresh_before_minutes"]
 	if hasMinutes && !hasSeconds {
@@ -170,7 +180,27 @@ func ParseConfig(raw []byte) (Config, error) {
 	if err != nil {
 		return c, err
 	}
-	c.TargetGateway = targetGateways
+	c.GatewayPolicy = strings.ToLower(strings.TrimSpace(c.GatewayPolicy))
+	if !hasGatewayPolicy {
+		c.GatewayPolicy = gatewayPolicyAllow
+		if hasTargetGateway && targetGateways == "" {
+			c.GatewayPolicy = gatewayPolicyAny
+		}
+	}
+	if c.GatewayPolicy == "" {
+		c.GatewayPolicy = gatewayPolicyAllow
+	}
+	switch c.GatewayPolicy {
+	case gatewayPolicyAny:
+		c.TargetGateway = ""
+	case gatewayPolicyAllow, gatewayPolicyDeny:
+		if targetGateways == "" {
+			return c, errors.New("target_gateway must contain 1..32 gateway IDs unless gateway_policy is any")
+		}
+		c.TargetGateway = targetGateways
+	default:
+		return c, errors.New("gateway_policy must be allow, deny, or any")
+	}
 	c.DefaultRequestTimezone = strings.TrimSpace(c.DefaultRequestTimezone)
 	if c.DefaultRequestTimezone == "" {
 		c.DefaultRequestTimezone = defaultRequestTimezone
@@ -412,10 +442,27 @@ func targetGatewayList(raw string) []string {
 	return strings.Split(raw, ",")
 }
 
-func gatewayAllowed(gateway string, targetGateways string) bool {
+func gatewayAllowed(gateway string, gatewayPolicy string, targetGateways string) bool {
+	switch gatewayPolicy {
+	case gatewayPolicyAny:
+		return true
+	case gatewayPolicyDeny:
+		targets := targetGatewayList(targetGateways)
+		for _, target := range targets {
+			if gateway == target {
+				return false
+			}
+		}
+		return true
+	default:
+		return gatewayInList(gateway, targetGateways)
+	}
+}
+
+func gatewayInList(gateway string, targetGateways string) bool {
 	targets := targetGatewayList(targetGateways)
 	if len(targets) == 0 {
-		return true
+		return false
 	}
 	for _, target := range targets {
 		if gateway == target {
@@ -549,7 +596,7 @@ func configFingerprint(c Config, a AccountConfig, model string) string {
 		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),
 		strconv.FormatBool(c.RequestRewriteEnabled), c.DefaultRequestTimezone,
 		strconv.FormatBool(c.AllowState780), strconv.Itoa(c.State780TTLSeconds),
-		c.TargetGateway,
+		c.GatewayPolicy, c.TargetGateway,
 		strconv.FormatBool(c.RouteCookieReuse), strconv.FormatBool(c.MintFingerprintConvergence),
 		a.Plan, model, jsonText(struct {
 			ID             int64

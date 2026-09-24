@@ -152,9 +152,9 @@ func stateAgeSeconds(state string, now time.Time) int64 {
 	return int64(age / time.Second)
 }
 
-func routeGatewayAcceptance(state string, cookies map[string]string, targetGateways string) (string, string) {
+func routeGatewayAcceptance(state string, cookies map[string]string, gatewayPolicy, targetGateways string) (string, string) {
 	gateway := gatewayFromCookies(cookies)
-	if !stateRequiresSession(state) || strings.TrimSpace(targetGateways) == "" {
+	if !stateRequiresSession(state) || gatewayPolicy == gatewayPolicyAny {
 		return gateway, ""
 	}
 	if len(routeCookies(cookies)) == 0 {
@@ -163,13 +163,13 @@ func routeGatewayAcceptance(state string, cookies map[string]string, targetGatew
 	if gateway == "" {
 		return "", "gateway_unknown"
 	}
-	if !gatewayAllowed(gateway, targetGateways) {
+	if !gatewayAllowed(gateway, gatewayPolicy, targetGateways) {
 		return gateway, "gateway_mismatch"
 	}
 	return gateway, ""
 }
 
-func (e *Engine) preferredRouteCookies(accountID int64, targetGateways string) map[string]string {
+func (e *Engine) preferredRouteCookies(accountID int64, gatewayPolicy, targetGateways string) map[string]string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	session, ok := e.routeSessions[accountID]
@@ -180,20 +180,20 @@ func (e *Engine) preferredRouteCookies(accountID int64, targetGateways string) m
 		delete(e.routeSessions, accountID)
 		return nil
 	}
-	if !gatewayAllowed(session.Gateway, targetGateways) {
+	if !gatewayAllowed(session.Gateway, gatewayPolicy, targetGateways) {
 		delete(e.routeSessions, accountID)
 		return nil
 	}
 	return cloneCookies(session.Cookies)
 }
 
-func (e *Engine) rememberRouteCookies(accountID int64, cookies map[string]string, targetGateways string) {
+func (e *Engine) rememberRouteCookies(accountID int64, cookies map[string]string, gatewayPolicy, targetGateways string) {
 	routes := routeCookies(cookies)
 	if len(routes) == 0 {
 		return
 	}
 	gateway := gatewayFromCookies(routes)
-	if !gatewayAllowed(gateway, targetGateways) {
+	if !gatewayAllowed(gateway, gatewayPolicy, targetGateways) {
 		return
 	}
 	now := time.Now().UTC()

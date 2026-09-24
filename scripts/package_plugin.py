@@ -15,7 +15,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugin"
-VERSION = "4.5.0"
+VERSION = "4.5.1"
 PLUGIN_ID = "io.github.wangyunjeff.sub2api-state-kit"
 KEY_ID = "state-kit-local-v1"
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-arm64")
@@ -28,7 +28,7 @@ def run(args, **kwargs):
 def write_zip(path: Path, files: dict[str, bytes]):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, data in sorted(files.items()):
-            info = zipfile.ZipInfo(name, date_time=(2026, 9, 21, 0, 0, 0))
+            info = zipfile.ZipInfo(name, date_time=(2026, 9, 24, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3
             info.external_attr = (0o100755 if name.startswith("runtimes/") else 0o100644) << 16

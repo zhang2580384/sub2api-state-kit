@@ -11,6 +11,7 @@ import (
 type diagnosticStatus struct {
 	DiagnosticsEnabled   bool              `json:"diagnostics_enabled"`
 	DiagnosticsListening bool              `json:"diagnostics_listening"`
+	DiagnosticsRetained  int               `json:"diagnostics_retained"`
 	Diagnostics          []diagnosticEvent `json:"diagnostics"`
 }
 
@@ -27,15 +28,15 @@ func diagnosticHealth(t *testing.T, e *Engine) diagnosticStatus {
 	return status
 }
 
-func TestDiagnosticListenerIsUiScopedBoundedAndRedacted(t *testing.T) {
+func TestDiagnosticHistoryIsPersistentBoundedAndRedacted(t *testing.T) {
 	e := newEngine(nil, "https://example.invalid", time.Second)
 	defer e.Close()
 
 	rawState := testState(292)
 	e.recordDiagnostic(diagnosticEvent{Stage: "capture", Outcome: "accepted", StateClass: stateDiagnosticClass(rawState),
 		TargetProxy: "socks5://proxy-user:proxy-secret@proxy.example:1080", CaptureEgress: "203.0.113.18"})
-	if status := diagnosticHealth(t, e); status.DiagnosticsEnabled || status.DiagnosticsListening || len(status.Diagnostics) != 0 {
-		t.Fatalf("diagnostics were active without an open panel: %+v", status)
+	if status := diagnosticHealth(t, e); !status.DiagnosticsEnabled || status.DiagnosticsListening || len(status.Diagnostics) != 1 {
+		t.Fatalf("diagnostic history was not retained before the panel opened: %+v", status)
 	}
 
 	started := time.Now()
@@ -59,10 +60,13 @@ func TestDiagnosticListenerIsUiScopedBoundedAndRedacted(t *testing.T) {
 	if !status.DiagnosticsListening {
 		t.Fatal("diagnostic listener compatibility flag was not reported")
 	}
-	if len(status.Diagnostics) != maxDiagnosticEvents {
-		t.Fatalf("diagnostic log length = %d, want %d", len(status.Diagnostics), maxDiagnosticEvents)
+	if len(status.Diagnostics) != maxDiagnosticResponseEvents || status.DiagnosticsRetained != maxDiagnosticEvents {
+		t.Fatalf("diagnostic response length/retained = %d/%d, want %d/%d",
+			len(status.Diagnostics), status.DiagnosticsRetained, maxDiagnosticResponseEvents, maxDiagnosticEvents)
 	}
-	if status.Diagnostics[0].Seq != 11 || status.Diagnostics[len(status.Diagnostics)-1].Seq != 250 {
+	wantLastSeq := uint64(maxDiagnosticEvents + 11)
+	wantFirstSeq := wantLastSeq - uint64(maxDiagnosticResponseEvents) + 1
+	if status.Diagnostics[0].Seq != wantFirstSeq || status.Diagnostics[len(status.Diagnostics)-1].Seq != wantLastSeq {
 		t.Fatalf("unexpected retained sequence range: %d..%d", status.Diagnostics[0].Seq, status.Diagnostics[len(status.Diagnostics)-1].Seq)
 	}
 	if response.StatusJson == "" || strings.Contains(response.StatusJson, "proxy-secret") || strings.Contains(response.StatusJson, rawState) {
@@ -77,8 +81,27 @@ func TestDiagnosticListenerIsUiScopedBoundedAndRedacted(t *testing.T) {
 	e.observeDiagnosticPollLocked(expired)
 	statusAfterClose := e.snapshotLocked(expired)
 	e.mu.Unlock()
-	if statusAfterClose.DiagnosticsListening || len(statusAfterClose.Diagnostics) != 0 {
-		t.Fatalf("diagnostics survived after the UI listener expired: %+v", statusAfterClose)
+	if statusAfterClose.DiagnosticsListening || len(statusAfterClose.Diagnostics) != maxDiagnosticResponseEvents ||
+		statusAfterClose.DiagnosticsRetained != maxDiagnosticEvents {
+		t.Fatalf("diagnostic history was not retained after the UI listener expired: %+v", statusAfterClose)
+	}
+}
+
+func TestDiagnosticHistoryExpiresAfterFiveHours(t *testing.T) {
+	e := newEngine(nil, "https://example.invalid", time.Second)
+	defer e.Close()
+
+	now := time.Now().UTC()
+	e.diagnostics = []diagnosticEvent{
+		{Seq: 1, Timestamp: now.Add(-maxDiagnosticAge - time.Minute).Format(time.RFC3339Nano), Stage: "capture", Outcome: "probe_failed"},
+		{Seq: 2, Timestamp: now.Add(-maxDiagnosticAge + time.Minute).Format(time.RFC3339Nano), Stage: "capture", Outcome: "accepted"},
+	}
+	e.mu.Lock()
+	e.pruneDiagnosticsLocked(now)
+	status := e.snapshotLocked(now)
+	e.mu.Unlock()
+	if len(status.Diagnostics) != 1 || status.Diagnostics[0].Seq != 2 {
+		t.Fatalf("five-hour diagnostic pruning retained %+v", status.Diagnostics)
 	}
 }
 

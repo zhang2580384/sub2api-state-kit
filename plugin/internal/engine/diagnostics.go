@@ -11,10 +11,12 @@ import (
 )
 
 const (
-	maxDiagnosticEvents       = 240
-	diagnosticBurstGap        = 750 * time.Millisecond
-	diagnosticBurstCount      = 3
-	diagnosticListenKeepalive = 3 * time.Second
+	maxDiagnosticEvents         = 5000
+	maxDiagnosticResponseEvents = 2000
+	maxDiagnosticAge            = 5 * time.Hour
+	diagnosticBurstGap          = 750 * time.Millisecond
+	diagnosticBurstCount        = 3
+	diagnosticListenKeepalive   = 3 * time.Second
 )
 
 // diagnosticEvent intentionally contains fingerprints and classifications only.
@@ -51,9 +53,9 @@ func (e *Engine) diagnosticsListeningLocked(now time.Time) bool {
 }
 
 // The host bridge is read-only, so the UI signals an open diagnostics panel by
-// polling Health at a faster cadence than the normal status refresh. Two close
-// polls open a short listener window; after the panel closes the window expires
-// on its own and no events are retained.
+// polling Health at a faster cadence than the normal status refresh. The
+// listener flag only controls presentation; event retention remains active so
+// opening the panel can show recent history.
 func (e *Engine) observeDiagnosticPollLocked(now time.Time) {
 	gap := time.Duration(0)
 	if !e.diagnosticPollAt.IsZero() {
@@ -68,11 +70,7 @@ func (e *Engine) observeDiagnosticPollLocked(now time.Time) {
 	if active && gap <= diagnosticBurstGap {
 		e.diagnosticUntil = now.Add(diagnosticListenKeepalive)
 	} else if !active && e.diagnosticBurst >= diagnosticBurstCount {
-		e.diagnostics = nil
-		e.diagnosticSeq = 0
 		e.diagnosticUntil = now.Add(diagnosticListenKeepalive)
-	} else if !active && gap > diagnosticBurstGap && len(e.diagnostics) != 0 {
-		e.diagnostics = nil
 	}
 	e.diagnosticPollAt = now
 }
@@ -89,12 +87,10 @@ func (e *Engine) recordDiagnostic(event diagnosticEvent) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.diagnosticsListeningLocked(time.Now()) {
-		return
-	}
+	now := time.Now()
 	e.diagnosticSeq++
 	event.Seq = e.diagnosticSeq
-	event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	event.Timestamp = now.UTC().Format(time.RFC3339Nano)
 	event.Model = safeDiagnosticModel(event.Model)
 	event.UpstreamProxy = diagnosticProxyEndpoint(event.UpstreamProxy)
 	event.TargetProxy = diagnosticProxyEndpoint(event.TargetProxy)
@@ -111,6 +107,23 @@ func (e *Engine) recordDiagnostic(event diagnosticEvent) {
 	event.Outcome = safeDiagnosticCode(event.Outcome, 64)
 	event.Error = safeDiagnosticCode(event.Error, 80)
 	e.diagnostics = append(e.diagnostics, event)
+	e.pruneDiagnosticsLocked(now)
+}
+
+func (e *Engine) pruneDiagnosticsLocked(now time.Time) {
+	cutoff := now.Add(-maxDiagnosticAge)
+	first := 0
+	for first < len(e.diagnostics) {
+		timestamp, err := time.Parse(time.RFC3339Nano, e.diagnostics[first].Timestamp)
+		if err == nil && !timestamp.Before(cutoff) {
+			break
+		}
+		first++
+	}
+	if first > 0 {
+		copy(e.diagnostics, e.diagnostics[first:])
+		e.diagnostics = e.diagnostics[:len(e.diagnostics)-first]
+	}
 	if len(e.diagnostics) > maxDiagnosticEvents {
 		copy(e.diagnostics, e.diagnostics[len(e.diagnostics)-maxDiagnosticEvents:])
 		e.diagnostics = e.diagnostics[:maxDiagnosticEvents]

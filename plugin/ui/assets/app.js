@@ -7,7 +7,7 @@
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
-    allow_state_780: false, state_780_ttl_seconds: 240, target_gateway: 'unified-15,unified-88,unified-180',
+    allow_state_780: false, state_780_ttl_seconds: 240, gateway_policy: 'allow', target_gateway: 'unified-15,unified-88,unified-180',
     route_cookie_reuse: true, mint_fingerprint_convergence: true,
     ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
     cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
@@ -18,6 +18,8 @@
     cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], state_780_ttl_seconds: [30, 1800, '780 票据持续期'],
     standby_lead_seconds: [10, 600, '备用票提前时间'],
     attempt_interval_seconds: [1, 300, '常规重试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
+  const MAX_DIAGNOSTIC_EVENTS = 5000;
+  const MAX_DIAGNOSTIC_VIEW_EVENTS = 2000;
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
     ready: ['可用', 'success'], renewing: ['可用 · 续期中', 'success'], cooldown: ['冷却中', 'warning'],
@@ -159,9 +161,18 @@
       return Number(a.slice('unified-'.length)) - Number(b.slice('unified-'.length));
     }).join(',');
   }
+  function normalizeGatewayPolicy(value) {
+    const policy = String(value || '').trim().toLowerCase() || 'allow';
+    if (!['allow', 'deny', 'any'].includes(policy)) throw new Error('网关策略须选择 allow、deny 或 any。');
+    return policy;
+  }
   function normalizeConfig(input) {
     const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
     const config = Object.assign({}, DEFAULT_CONFIG, { proxy_generator_blocked_countries: DEFAULT_CONFIG.proxy_generator_blocked_countries.slice() });
+    if (source.gateway_policy === undefined) {
+      const legacyTarget = (Array.isArray(source.target_gateway) ? source.target_gateway.join(',') : String(source.target_gateway || '')).trim().toLowerCase();
+      config.gateway_policy = source.target_gateway !== undefined && (legacyTarget === '' || legacyTarget === 'any' || legacyTarget === '*') ? 'any' : 'allow';
+    }
     if (source.refresh_before_seconds === undefined && Number.isInteger(source.refresh_before_minutes)) {
       config.refresh_before_seconds = source.refresh_before_minutes * 60;
     }
@@ -193,7 +204,13 @@
     if (typeof config.allow_state_780 !== 'boolean') throw new Error('780 状态兼容开关格式不正确。');
     if (typeof config.route_cookie_reuse !== 'boolean') throw new Error('网关 Cookie 复用开关格式不正确。');
     if (typeof config.mint_fingerprint_convergence !== 'boolean') throw new Error('打票指纹收敛开关格式不正确。');
-    config.target_gateway = normalizeTargetGateways(config.target_gateway);
+    config.gateway_policy = normalizeGatewayPolicy(config.gateway_policy);
+    if (config.gateway_policy === 'any') {
+      config.target_gateway = '';
+    } else {
+      config.target_gateway = normalizeTargetGateways(config.target_gateway);
+      if (!config.target_gateway) throw new Error('网关策略为 allow 或 deny 时，网关列表至少填写一个编号。');
+    }
     if (typeof config.request_rewrite_enabled !== 'boolean') throw new Error('请求环境替换开关格式不正确。');
     config.default_request_timezone = validateTimezone(config.default_request_timezone, '默认请求时区');
     if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('运行方式须选择稳定同出口或 Cookie 分流。');
@@ -287,7 +304,10 @@
         'state_312', 'unexpected_state'].includes(event.outcome)) item.rejected += 1;
       stats.set(gateway, item);
     });
-    return Array.from(stats.values()).sort(function (a, b) {
+    return Array.from(stats.values()).map(function (item) {
+      item.passRate = item.total ? Math.round(item.passed * 100 / item.total) : 0;
+      return item;
+    }).sort(function (a, b) {
       return b.total - a.total || Number(a.gateway.slice(8)) - Number(b.gateway.slice(8));
     });
   }
@@ -349,8 +369,11 @@
       account_catalog: catalog,
       tickets: Array.isArray(status.tickets) ? status.tickets.filter(function (ticket) { return ticket && accountID(ticket.account_id) !== null; }).slice(0, 4096) : [],
       diagnostics_enabled: status.diagnostics_enabled === true,
-      diagnostics_listening: status.diagnostics_listening === true || status.diagnostics_enabled === true,
-      diagnostics: Array.isArray(status.diagnostics) ? status.diagnostics.map(normalizeDiagnostic).filter(Boolean).slice(-240) : [],
+      diagnostics_listening: status.diagnostics_listening === true,
+      diagnostics: Array.isArray(status.diagnostics) ? status.diagnostics.map(normalizeDiagnostic).filter(Boolean).slice(-MAX_DIAGNOSTIC_VIEW_EVENTS) : [],
+      diagnostics_retained: Number.isSafeInteger(status.diagnostics_retained) && status.diagnostics_retained >= 0
+        ? Math.max(status.diagnostics_retained, Array.isArray(status.diagnostics) ? status.diagnostics.length : 0)
+        : Array.isArray(status.diagnostics) ? status.diagnostics.length : 0,
       message: redactError(MESSAGES[status.message] || status.message || result && result.message || '') };
   }
   function remainingText(seconds) {
@@ -372,12 +395,16 @@
     let diagnosticsOpen = false;
     let diagnosticsListening = false;
     let diagnosticsTimer;
+    let diagnosticsDrag;
+    let hostHeight = 0;
     let closed = false;
     let pollTimer;
     let resizeObserver;
     let accounts = [];
     let statusAccountCatalog = [];
     let lastDiagnostics = [];
+    let diagnosticsRetained = 0;
+    let diagnosticsRenderedSignature = '';
     const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_seconds: 'refresh-before-seconds',
       proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
       cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', state_780_ttl_seconds: 'state-780-ttl-seconds',
@@ -388,6 +415,88 @@
       if (text !== undefined) node.textContent = String(text);
       if (className) node.className = className;
       return node;
+    }
+    function diagnosticsViewport() {
+      const width = global.innerWidth || document.documentElement.clientWidth || 1440;
+      const height = global.innerHeight || document.documentElement.clientHeight || 900;
+      return { width: width, height: height };
+    }
+    function savedDiagnosticsPosition() {
+      try {
+        const raw = global.sessionStorage && global.sessionStorage.getItem('sub2api-state-kit-diagnostics-position');
+        if (!raw) return null;
+        const value = JSON.parse(raw);
+        return Number.isFinite(value.left) && Number.isFinite(value.top) ? value : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    function saveDiagnosticsPosition(left, top) {
+      try {
+        if (global.sessionStorage) global.sessionStorage.setItem('sub2api-state-kit-diagnostics-position', JSON.stringify({ left: left, top: top }));
+      } catch (_) {
+        // Session storage may be unavailable inside the host sandbox.
+      }
+    }
+    function clampDiagnosticsPosition(dialog, left, top) {
+      if (!dialog || typeof dialog.getBoundingClientRect !== 'function') return { left: left, top: top };
+      const rect = dialog.getBoundingClientRect();
+      const viewport = diagnosticsViewport();
+      const maxLeft = Math.max(0, viewport.width - rect.width);
+      const maxTop = Math.max(0, viewport.height - rect.height);
+      return {
+        left: Math.min(Math.max(0, left), maxLeft),
+        top: Math.min(Math.max(0, top), maxTop)
+      };
+    }
+    function placeDiagnosticsDialog(dialog) {
+      if (!dialog || !dialog.style || typeof dialog.getBoundingClientRect !== 'function') return;
+      const rect = dialog.getBoundingClientRect();
+      const viewport = diagnosticsViewport();
+      const saved = savedDiagnosticsPosition();
+      const centered = { left: Math.max(0, (viewport.width - rect.width) / 2), top: Math.max(0, (viewport.height - rect.height) / 2) };
+      const next = clampDiagnosticsPosition(dialog, saved ? saved.left : centered.left, saved ? saved.top : centered.top);
+      dialog.style.left = next.left + 'px';
+      dialog.style.top = next.top + 'px';
+    }
+    function moveDiagnosticsDialog(event) {
+      if (!diagnosticsDrag) return;
+      if (diagnosticsDrag.pointerId !== undefined && event.pointerId !== undefined && diagnosticsDrag.pointerId !== event.pointerId) return;
+      const dialog = byID('diagnostics-dialog');
+      if (!dialog || !dialog.style) return;
+      const next = clampDiagnosticsPosition(dialog, event.clientX - diagnosticsDrag.offsetX, event.clientY - diagnosticsDrag.offsetY);
+      dialog.style.left = next.left + 'px';
+      dialog.style.top = next.top + 'px';
+      diagnosticsDrag.left = next.left;
+      diagnosticsDrag.top = next.top;
+      if (event.preventDefault) event.preventDefault();
+    }
+    function endDiagnosticsDrag(event) {
+      if (!diagnosticsDrag || (diagnosticsDrag.pointerId !== undefined && event && event.pointerId !== undefined && diagnosticsDrag.pointerId !== event.pointerId)) return;
+      const position = { left: diagnosticsDrag.left, top: diagnosticsDrag.top };
+      diagnosticsDrag = undefined;
+      if (Number.isFinite(position.left) && Number.isFinite(position.top)) saveDiagnosticsPosition(position.left, position.top);
+    }
+    function startDiagnosticsDrag(event) {
+      if (event.button !== undefined && event.button !== 0) return;
+      const dialog = byID('diagnostics-dialog');
+      if (!dialog || typeof dialog.getBoundingClientRect !== 'function') return;
+      const rect = dialog.getBoundingClientRect();
+      diagnosticsDrag = {
+        pointerId: event.pointerId,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+        left: rect.left,
+        top: rect.top
+      };
+      const handle = byID('diagnostics-drag-handle');
+      if (handle && typeof handle.setPointerCapture === 'function' && event.pointerId !== undefined) {
+        try { handle.setPointerCapture(event.pointerId); } catch (_) { /* Pointer capture is optional. */ }
+      }
+      if (event.preventDefault) event.preventDefault();
+    }
+    function repositionDiagnosticsDialog() {
+      if (diagnosticsOpen) placeDiagnosticsDialog(byID('diagnostics-dialog'));
     }
     function notice(message, kind) {
       const node = byID('notice');
@@ -400,6 +509,11 @@
       byID('save-state').className = dirty ? 'dirty' : 'muted';
     }
     function markDirty() { if (loaded) { dirty = true; updateSaveState(); } }
+    function renderGatewayPolicy() {
+      const unrestricted = byID('gateway-policy').value === 'any';
+      byID('target-gateway').disabled = unrestricted;
+      byID('target-gateway').required = !unrestricted;
+    }
     function renderTicketMode() {
       const cookieMode = byID('ticket-mode').value === 'cookie';
       const generatorCapture = !cookieMode || byID('cookie-capture-mode').value === 'generator';
@@ -412,6 +526,7 @@
       byID('cookie-business-proxy-url').disabled = !cookieMode;
       byID('standby-ticket-enabled').disabled = false;
       byID('standby-lead-seconds').disabled = !byID('standby-ticket-enabled').checked;
+      renderGatewayPolicy();
     }
     function setBusy(value) {
       busy = value;
@@ -549,7 +664,8 @@
       byID('allow-state-780').checked = config.allow_state_780 === true;
       byID('route-cookie-reuse').checked = config.route_cookie_reuse === true;
       byID('mint-fingerprint-convergence').checked = config.mint_fingerprint_convergence === true;
-      byID('target-gateway').value = config.target_gateway || 'any';
+      byID('gateway-policy').value = config.gateway_policy;
+      byID('target-gateway').value = config.target_gateway || '';
       byID('request-rewrite-enabled').checked = config.request_rewrite_enabled === true;
       byID('default-request-timezone').value = config.default_request_timezone;
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
@@ -576,7 +692,8 @@
         allow_state_780: byID('allow-state-780').checked,
         route_cookie_reuse: byID('route-cookie-reuse').checked,
         mint_fingerprint_convergence: byID('mint-fingerprint-convergence').checked,
-        target_gateway: normalizeTargetGateways(byID('target-gateway').value),
+        gateway_policy: byID('gateway-policy').value,
+        target_gateway: byID('target-gateway').value.trim(),
         request_rewrite_enabled: byID('request-rewrite-enabled').checked,
         default_request_timezone: byID('default-request-timezone').value.trim()
       };
@@ -623,12 +740,19 @@
       });
       byID('tickets-empty').hidden = status.tickets.length !== 0;
       lastDiagnostics = status.diagnostics.slice();
+      diagnosticsRetained = status.diagnostics_retained;
       diagnosticsListening = status.diagnostics_listening;
       renderDiagnostics();
     }
-    function renderDiagnostics() {
+    function renderDiagnostics(force) {
+      const signature = [diagnosticsOpen ? 'open' : 'closed', diagnosticsListening ? 'listening' : 'idle',
+        diagnosticsRetained, lastDiagnostics.length, lastDiagnostics.length ? lastDiagnostics[0].seq : 0,
+        lastDiagnostics.length ? lastDiagnostics[lastDiagnostics.length - 1].seq : 0].join(':');
+      if (!force && diagnosticsRenderedSignature === signature) return;
+      diagnosticsRenderedSignature = signature;
       const body = byID('diagnostics-body');
       const gatewaySummary = byID('diagnostics-gateways');
+      const gatewayPanel = byID('diagnostics-gateways-panel');
       body.replaceChildren();
       gatewaySummary.replaceChildren();
       lastDiagnostics.slice().reverse().forEach(function (event) {
@@ -660,22 +784,25 @@
         body.appendChild(row);
       });
       const gatewayStats = diagnosticGatewayStats(lastDiagnostics);
-      gatewayStats.slice(0, 8).forEach(function (stat) {
+      gatewayStats.forEach(function (stat) {
         const parts = [stat.gateway, '出现 ' + stat.total, '通过 ' + stat.passed];
         if (stat.modelMismatch) parts.push('模型不符 ' + stat.modelMismatch);
         if (stat.rejected) parts.push('拒绝 ' + stat.rejected);
+        parts.push('通过率 ' + stat.passRate + '%');
         gatewaySummary.appendChild(element('span', parts.join(' · '), 'diagnostic-gateway-stat'));
       });
-      gatewaySummary.hidden = gatewayStats.length === 0;
+      gatewayPanel.hidden = gatewayStats.length === 0;
       byID('diagnostics-empty').hidden = lastDiagnostics.length !== 0;
       if (!diagnosticsOpen) {
-        byID('diagnostics-summary').textContent = '打开面板后开始实时监听，不保存日志。';
+        byID('diagnostics-summary').textContent = '内存保留最近 5 小时，插件重启后清空。';
       } else if (!diagnosticsListening) {
         byID('diagnostics-summary').textContent = '正在建立实时监听…';
       } else if (lastDiagnostics.length) {
-        byID('diagnostics-summary').textContent = '实时监听中 · 最近 ' + lastDiagnostics.length + ' 条，新事件置顶，不保存。';
+        byID('diagnostics-summary').textContent = diagnosticsRetained > lastDiagnostics.length
+          ? '实时监听中 · 显示最新 ' + lastDiagnostics.length + ' 条，内存共 ' + diagnosticsRetained + ' 条（最近 5 小时）。'
+          : '实时监听中 · 最近 5 小时 ' + lastDiagnostics.length + ' 条，新事件置顶。';
       } else {
-        byID('diagnostics-summary').textContent = '正在监听，等待新事件；关闭面板即停止。';
+        byID('diagnostics-summary').textContent = '正在监听，最近 5 小时暂无事件。';
       }
     }
     async function refreshStatus() {
@@ -697,6 +824,7 @@
     byID('ticket-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
     byID('cookie-capture-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
     byID('standby-ticket-enabled').addEventListener('change', function () { renderTicketMode(); markDirty(); });
+    byID('gateway-policy').addEventListener('change', function () { renderGatewayPolicy(); markDirty(); });
     async function saveConfig(event) {
       event.preventDefault(); if (busy || !loaded) return;
       let config;
@@ -769,9 +897,8 @@
     }
     async function startDiagnosticsListening() {
       diagnosticsOpen = true;
-      lastDiagnostics = [];
       byID('diagnostics-summary').textContent = '正在建立实时监听…';
-      renderDiagnostics();
+      renderDiagnostics(true);
       try {
         await signalDiagnosticsListener();
       } catch (error) {
@@ -790,15 +917,22 @@
       diagnosticsListening = false;
       global.clearInterval(diagnosticsTimer);
       diagnosticsTimer = undefined;
-      lastDiagnostics = [];
-      renderDiagnostics();
+      renderDiagnostics(true);
+      resize();
     }
     byID('open-diagnostics').addEventListener('click', async function () {
       const dialog = byID('diagnostics-dialog');
+      diagnosticsOpen = true;
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.hidden = false;
+      placeDiagnosticsDialog(dialog);
       await startDiagnosticsListening();
     });
+    byID('diagnostics-drag-handle').addEventListener('pointerdown', startDiagnosticsDrag);
+    global.addEventListener('pointermove', moveDiagnosticsDialog);
+    global.addEventListener('pointerup', endDiagnosticsDrag);
+    global.addEventListener('pointercancel', endDiagnosticsDrag);
+    global.addEventListener('resize', repositionDiagnosticsDialog);
     byID('diagnostics-refresh').addEventListener('click', refreshStatus);
     byID('diagnostics-close').addEventListener('click', function () {
       const dialog = byID('diagnostics-dialog');
@@ -825,12 +959,20 @@
         notice('复制诊断日志失败：' + error.message, 'error');
       } finally { diagnosticsBusy = false; }
     });
-    function resize() { try { bridge.resize(document.documentElement.scrollHeight); } catch (_) { /* Context may already be closed. */ } }
+    function resize() {
+      const measured = Math.max(0, document.documentElement.scrollHeight || 0);
+      if (!diagnosticsOpen || !hostHeight) hostHeight = measured;
+      try { bridge.resize(hostHeight); } catch (_) { /* Context may already be closed. */ }
+    }
     function stop() {
       if (closed) return;
       closed = true; global.clearInterval(pollTimer);
       stopDiagnosticsListening();
       if (resizeObserver) resizeObserver.disconnect();
+      global.removeEventListener('pointermove', moveDiagnosticsDialog);
+      global.removeEventListener('pointerup', endDiagnosticsDrag);
+      global.removeEventListener('pointercancel', endDiagnosticsDrag);
+      global.removeEventListener('resize', repositionDiagnosticsDialog);
       if (bridge) bridge.dispose();
       global.removeEventListener('pagehide', stop);
     }

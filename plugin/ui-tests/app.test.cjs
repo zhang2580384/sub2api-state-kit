@@ -1,6 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const ui = require('../ui/assets/app.js');
 
 function configured(overrides = {}) {
@@ -18,7 +20,11 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
   assert.equal(ui.normalizeConfig({}).allow_state_780, false);
   assert.equal(ui.normalizeConfig({}).state_780_ttl_seconds, 240);
+  assert.equal(ui.normalizeConfig({}).gateway_policy, 'allow');
   assert.equal(ui.normalizeConfig({}).target_gateway, 'unified-15,unified-88,unified-180');
+  assert.equal(ui.normalizeConfig({ target_gateway: 'any' }).gateway_policy, 'any');
+  assert.equal(ui.normalizeConfig({ target_gateway: '' }).gateway_policy, 'any');
+  assert.equal(ui.normalizeConfig({ gateway_policy: 'deny', target_gateway: '88' }).gateway_policy, 'deny');
   assert.equal(ui.normalizeConfig({}).route_cookie_reuse, true);
   assert.equal(ui.normalizeConfig({}).mint_fingerprint_convergence, true);
   assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
@@ -153,6 +159,10 @@ test('validates bounds, renewal horizon, duplicate accounts and model allowlist'
   assert.throws(() => ui.validateConfig(configured({ target_gateway: 'any,unified-88' })), /不能同时/);
   assert.equal(ui.validateConfig(configured({ target_gateway: '88, 180,15,unified_88' })).target_gateway,
     'unified-15,unified-88,unified-180');
+  assert.equal(ui.validateConfig(configured({ gateway_policy: 'any', target_gateway: 'unified-88' })).target_gateway, '');
+  assert.equal(ui.validateConfig(configured({ gateway_policy: 'deny', target_gateway: '88,180' })).gateway_policy, 'deny');
+  assert.throws(() => ui.validateConfig(configured({ gateway_policy: 'blocked' })), /网关策略/);
+  assert.throws(() => ui.validateConfig(configured({ gateway_policy: 'deny', target_gateway: '' })), /至少填写一个/);
   assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 600 })), /必须小于/);
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 10, refresh_before_seconds: 30 })));
   const config = configured(); config.accounts.push({ ...config.accounts[0] });
@@ -177,7 +187,7 @@ test('legacy minute renewal horizon migrates to seconds', () => {
 
 test('status tolerates pre-initialization, de-duplicates safe IDs, never labels unknown state as raw text', () => {
   assert.deepEqual(ui.parseStatus({ healthy: true }), { host_ready: false, account_ids: [], account_catalog: [], tickets: [],
-    diagnostics_enabled: false, diagnostics_listening: false, diagnostics: [], message: '' });
+    diagnostics_enabled: false, diagnostics_listening: false, diagnostics_retained: 0, diagnostics: [], message: '' });
   const status = ui.parseStatus({ status_json: JSON.stringify({ host_ready: true, account_ids: [8, 2, 8, null, -1, '9', '9007199254740992'],
     account_catalog: [{ account_id: 8, name: ' Eight ', email: 'eight@example.com', expires_at: '2026-10-01', quota: '10/20' }], tickets: [] }) });
   assert.deepEqual(status.account_ids, [2, 8, 9]);
@@ -212,6 +222,7 @@ test('diagnostic events expose state classes and egress evidence without credent
   assert.equal(parsed.diagnostics[0].state_class, '292');
   assert.equal(parsed.diagnostics[0].capture_egress, '203.0.113.18');
   assert.equal(parsed.diagnostics[0].egress_match, false);
+  assert.equal(parsed.diagnostics_retained, 1);
   assert.equal(JSON.stringify(parsed).includes('secret'), false);
   assert.equal(JSON.stringify(parsed).includes('gAAAAA-secret-state'), false);
   assert.equal(ui.diagnosticStageLabel('capture'), '采集票据');
@@ -223,9 +234,9 @@ test('diagnostic events expose state classes and egress evidence without credent
     { gateway: 'unified-12', outcome: 'gateway_mismatch' },
     { gateway: 'not-a-gateway', outcome: 'accepted' }
   ]), [
-    { gateway: 'unified-15', total: 2, passed: 2, rejected: 0, modelMismatch: 0 },
-    { gateway: 'unified-12', total: 1, passed: 0, rejected: 1, modelMismatch: 0 },
-    { gateway: 'unified-180', total: 1, passed: 0, rejected: 0, modelMismatch: 1 }
+    { gateway: 'unified-15', total: 2, passed: 2, rejected: 0, modelMismatch: 0, passRate: 100 },
+    { gateway: 'unified-12', total: 1, passed: 0, rejected: 1, modelMismatch: 0, passRate: 0 },
+    { gateway: 'unified-180', total: 1, passed: 0, rejected: 0, modelMismatch: 1, passRate: 0 }
   ]);
 });
 
@@ -399,12 +410,19 @@ test('780 compatibility is explicit and saved with the advanced state policy', a
   h.get('route-cookie-reuse').checked = true;
   h.get('mint-fingerprint-convergence').checked = true;
   h.get('state-780-ttl-seconds').value = '240';
+  h.get('gateway-policy').value = 'any';
+  await h.get('gateway-policy').fire('change');
+  assert.equal(h.get('target-gateway').disabled, true);
+  h.get('gateway-policy').value = 'deny';
+  await h.get('gateway-policy').fire('change');
+  assert.equal(h.get('target-gateway').disabled, false);
   h.get('target-gateway').value = '88, 180,15';
   await h.get('config-form').fire('change');
   await h.get('save-config').click();
   assert.equal(h.calls.save.length, 1);
   assert.equal(h.calls.save[0].allow_state_780, true);
   assert.equal(h.calls.save[0].state_780_ttl_seconds, 240);
+  assert.equal(h.calls.save[0].gateway_policy, 'deny');
   assert.equal(h.calls.save[0].target_gateway, 'unified-15,unified-88,unified-180');
   assert.equal(h.calls.save[0].route_cookie_reuse, true);
   assert.equal(h.calls.save[0].mint_fingerprint_convergence, true);
@@ -451,7 +469,7 @@ test('cookie split mode saves capture, business, TTL and standby controls', asyn
   h.runtime.stop();
 });
 
-test('diagnostic panel listens only while open, places newest first and clears on close', async () => {
+test('diagnostic panel listens while open, places newest first and retains history on close', async () => {
   const h = uiHarness(); await settle();
   h.setStatus({ host_ready: true, tickets: [], diagnostics_enabled: true, diagnostics_listening: true, diagnostics: [{
     seq: 1, time: '2026-09-21T12:00:00Z', account_id: 19, model: 'gpt-6-astra', stage: 'fixed_validation',
@@ -481,7 +499,8 @@ test('diagnostic panel listens only while open, places newest first and clears o
   assert.match(text(h.get('diagnostics-gateways')), /unified-15 · 出现 1 · 通过 1/);
   assert.equal(rendered.includes('secret'), false);
   h.get('diagnostics-dialog').close();
-  assert.equal(h.get('diagnostics-body').children.length, 0);
+  assert.equal(h.get('diagnostics-body').children.length, 2);
+  assert.match(h.get('diagnostics-summary').textContent, /最近 5 小时/);
   assert.equal(h.timers.size, 0);
   h.runtime.stop();
 });
@@ -494,7 +513,7 @@ test('diagnostic panel opens the listener with parallel status signals and displ
         slowFirst = false;
         await new Promise(resolve => setTimeout(resolve, 30));
       }
-      return { host_ready: true, tickets: [], diagnostics_enabled: true, diagnostics_listening: true, diagnostics: [{
+      return { host_ready: true, tickets: [], diagnostics_enabled: true, diagnostics_listening: true, diagnostics_retained: 2200, diagnostics: [{
         seq: 3, time: '2026-09-24T08:00:00Z', account_id: 42, model: 'gpt-6-astra',
         stage: 'fixed_validation', state_length: 780, state_class: '780',
         response_model: 'gpt-6-astra', http_status: 200, outcome: 'accepted'
@@ -509,5 +528,18 @@ test('diagnostic panel opens the listener with parallel status signals and displ
   await opening;
   const cells = h.get('diagnostics-body').children[0].children;
   assert.match(String(cells[5].textContent), /780/);
+  assert.match(h.get('diagnostics-summary').textContent, /内存共 2200 条/);
   h.runtime.stop();
+});
+
+test('diagnostic window uses a fixed scrollable layout with a drag handle', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'assets', 'diagnostics.css'), 'utf8');
+  assert.match(html, /id="gateway-policy"/);
+  assert.match(html, /id="diagnostics-drag-handle"/);
+  assert.match(html, /最近 5 小时/);
+  assert.match(css, /height:\s*min\(900px/);
+  assert.match(css, /\.diagnostic-dialog\[open\][\s\S]*display:\s*flex/);
+  assert.match(css, /\.diagnostics-table[\s\S]*overflow:\s*auto/);
+  assert.match(css, /\.diagnostics-gateways-panel[\s\S]*overflow:\s*auto/);
 });

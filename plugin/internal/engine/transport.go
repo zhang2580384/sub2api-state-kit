@@ -554,6 +554,7 @@ func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) 
 	}
 	var routeAccountID int64
 	var routeSnapshot map[string]string
+	var routeGatewayPolicy string
 	var routeTargetGateway string
 	e.mu.Lock()
 	if e.closed || e.generation != receipt.Generation {
@@ -573,7 +574,7 @@ func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) 
 		mergeResponseCookies(t.Cookies, responseCookies)
 	}
 	if responseState != "" && validPlanState(responseState, t.Plan, e.config.AllowState780) {
-		if _, gatewayReason := routeGatewayAcceptance(responseState, t.Cookies, e.config.TargetGateway); gatewayReason != "" {
+		if _, gatewayReason := routeGatewayAcceptance(responseState, t.Cookies, e.config.GatewayPolicy, e.config.TargetGateway); gatewayReason != "" {
 			e.mu.Unlock()
 			return
 		}
@@ -592,11 +593,12 @@ func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) 
 	if e.config.RouteCookieReuse {
 		routeAccountID = t.AccountID
 		routeSnapshot = cloneCookies(t.Cookies)
+		routeGatewayPolicy = e.config.GatewayPolicy
 		routeTargetGateway = e.config.TargetGateway
 	}
 	e.mu.Unlock()
 	if routeAccountID != 0 {
-		e.rememberRouteCookies(routeAccountID, routeSnapshot, routeTargetGateway)
+		e.rememberRouteCookies(routeAccountID, routeSnapshot, routeGatewayPolicy, routeTargetGateway)
 	}
 }
 
