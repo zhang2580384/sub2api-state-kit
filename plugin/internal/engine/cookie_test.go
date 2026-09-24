@@ -192,6 +192,34 @@ func TestCookieReceiptNeverPersistsProxyCredentials(t *testing.T) {
 	}
 }
 
+func TestCookieBusinessResponseRollsStateForward(t *testing.T) {
+	c := DefaultConfig()
+	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
+	a := AccountConfig{AccountID: 7, Plan: "pro", Enabled: true, Models: []string{"gpt-6-astra"}}
+	current := &ticket{
+		AccountID: 7, Model: "gpt-6-astra", Plan: "pro", State: testState(292), Version: "version",
+		ConfigFingerprint: configFingerprint(c, a, "gpt-6-astra"), TicketMode: ticketModeCookie,
+		Cookies: map[string]string{"__cf_bm": "old"}, SessionID: "session",
+	}
+	e := &Engine{config: c, tickets: map[string]*ticket{keyFor(7, "gpt-6-astra"): current}}
+	receipt := &receipt{
+		Key: keyFor(7, "gpt-6-astra"), Version: current.Version, ConfigFingerprint: current.ConfigFingerprint,
+		TicketMode: ticketModeCookie,
+	}
+	response := &http.Response{Header: make(http.Header)}
+	response.Header.Set(StateHeader, testState(780))
+	response.Header.Add("Set-Cookie", "__cf_bm=next; Path=/; Secure")
+	e.updateTicketSession(receipt, response)
+
+	if current.State != testState(780) {
+		t.Fatalf("state did not roll forward: %q", current.State)
+	}
+	if current.Cookies["__cf_bm"] != "next" {
+		t.Fatalf("__cf_bm did not roll forward: %q", current.Cookies["__cf_bm"])
+	}
+}
+
 func TestStandbyPromotionRequiresBusinessEgressAndIdentity(t *testing.T) {
 	businessProxy := "http://business.example:8080"
 	fingerprint := proxyFingerprint(businessProxy)

@@ -435,7 +435,7 @@ func (e *Engine) ticketForRequest(_ context.Context, start *pluginv1.ForwardRequ
 }
 func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Time) bool {
 	if t == nil || t.AccountID != a.AccountID || t.Model != model || t.Plan != a.Plan ||
-		t.ConfigFingerprint != configFingerprint(c, a, model) || !validState(t.State, targetLength(a.Plan)) ||
+		t.ConfigFingerprint != configFingerprint(c, a, model) || !validPlanState(t.State, a.Plan, c.AllowState780) ||
 		t.Version == "" || t.FixedFingerprint == "" || t.IdentityFingerprint == "" ||
 		t.CapturedAt.IsZero() || t.CapturedAt.After(now.Add(time.Minute)) ||
 		!t.ExpiresAt.After(t.CapturedAt) || !now.Before(t.ExpiresAt) {

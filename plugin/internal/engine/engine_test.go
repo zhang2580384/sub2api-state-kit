@@ -353,6 +353,119 @@ func TestPlanLengthMismatchAndRoutingFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestState780CompatibilityRequiresOptInAndSameEgressValidation(t *testing.T) {
+	h := testHost(42)
+	pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(StateHeader, testState(780))
+		completed(w, "gpt-6-astra")
+	}))
+	defer pool.Close()
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		completed(w, "gpt-6-astra")
+	}))
+	defer business.Close()
+	e := testEngine(t, h, business.URL)
+	c := testConfig(pool.URL, 42)
+	c.AllowState780 = true
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+
+	off := testEngine(t, testHost(42), business.URL)
+	disabled := testConfig(pool.URL, 42)
+	apply(t, off, disabled)
+	waitFor(t, off, "cooldown")
+}
+
+func TestState780Rejects312DuringSameEgressValidation(t *testing.T) {
+	h := testHost(42)
+	pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(StateHeader, testState(780))
+		completed(w, "gpt-6-astra")
+	}))
+	defer pool.Close()
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(StateHeader, testState(312))
+		completed(w, "gpt-6-astra")
+	}))
+	defer business.Close()
+	e := testEngine(t, h, business.URL)
+	c := testConfig(pool.URL, 42)
+	c.AllowState780 = true
+	apply(t, e, c)
+	waitFor(t, e, "cooldown")
+}
+
+func TestCookieValidationPersistsRollingStateAndCookie(t *testing.T) {
+	h := testHost(42)
+	captureState := testState(780)
+	validatedState := testState(779) + "B"
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"203.0.113.1"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"203.0.113.1"}`))
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "capture"})
+		w.Header().Set(StateHeader, captureState)
+		completed(w, "gpt-6-astra")
+	}))
+	defer capture.Close()
+
+	var validationCalls atomic.Int32
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"198.51.100.2"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"198.51.100.2"}`))
+			return
+		}
+		if r.Header.Get(StateHeader) != captureState {
+			t.Errorf("validation state = %q; want capture state", r.Header.Get(StateHeader))
+		}
+		validationCalls.Add(1)
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "validated"})
+		w.Header().Set(StateHeader, validatedState)
+		completed(w, "gpt-6-astra")
+	}))
+	defer business.Close()
+
+	e := testEngine(t, h, business.URL)
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(capture.URL, 42)
+	c.TicketMode = ticketModeCookie
+	c.CookieCaptureMode = captureModeSOCKS5
+	c.CookieCaptureProxyURL = capture.URL
+	c.CookieBusinessProxyURL = business.URL
+	c.AllowState780 = true
+	apply(t, e, c)
+	waitFor(t, e, "ready")
+	if validationCalls.Load() == 0 {
+		t.Fatal("business egress validation did not run")
+	}
+
+	e.mu.Lock()
+	got := e.tickets[keyFor(42, "gpt-6-astra")]
+	var gotState, gotCookie string
+	if got != nil {
+		gotState = got.State
+		gotCookie = got.Cookies["__cf_bm"]
+	}
+	e.mu.Unlock()
+	if gotState != validatedState {
+		t.Fatalf("stored state = %q; want validation state", gotState)
+	}
+	if gotCookie != "validated" {
+		t.Fatalf("stored __cf_bm = %q; want validation cookie", gotCookie)
+	}
+}
+
 func TestAuthAndRateLimitStopRound(t *testing.T) {
 	for _, code := range []int{401, 403, 429} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {

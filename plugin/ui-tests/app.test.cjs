@@ -16,6 +16,7 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7 }] }).accounts[0].egress_mode, 'sub2');
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7, name: ' Example ' }] }).accounts[0].name, 'Example');
   assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
+  assert.equal(ui.normalizeConfig({}).allow_state_780, false);
   assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
   assert.equal(ui.normalizeConfig({}).cookie_capture_mode, 'generator');
   assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 300);
@@ -365,6 +366,17 @@ test('generator URL, blocked countries and fixed TTL are saved and disable the s
   assert.equal(h.calls.save[0].prefer_previous_ip, true);
   assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
   assert.equal(h.calls.save[0].refresh_before_seconds, 30);
+  h.runtime.stop();
+});
+
+test('780 compatibility is explicit and saved with the advanced state policy', async () => {
+  const h = uiHarness(); await settle();
+  assert.equal(h.get('allow-state-780').checked, false);
+  h.get('allow-state-780').checked = true;
+  await h.get('config-form').fire('change');
+  await h.get('save-config').click();
+  assert.equal(h.calls.save.length, 1);
+  assert.equal(h.calls.save[0].allow_state_780, true);
   h.runtime.stop();
 });
 

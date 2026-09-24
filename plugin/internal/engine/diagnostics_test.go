@@ -116,6 +116,9 @@ func TestDiagnosticStateAndEgressClassification(t *testing.T) {
 	if got := stateDiagnosticClass(testState(312)); got != "312" {
 		t.Fatalf("312 classification = %q", got)
 	}
+	if got := stateDiagnosticClass(testState(780)); got != "780" {
+		t.Fatalf("780 classification = %q", got)
+	}
 	if got := stateDiagnosticClass(""); got != "empty" {
 		t.Fatalf("empty classification = %q", got)
 	}

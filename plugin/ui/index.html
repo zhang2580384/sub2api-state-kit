@@ -32,6 +32,8 @@
             <option value="cookie">Cookie 分流：打票和业务可以使用不同出口</option>
           </select>
           <p id="ticket-mode-help" class="help">固定出口适合已验证的粘性 IP；Cookie 分流允许业务使用另一个出口。</p>
+          <div class="inline-switch"><label class="switch-label" for="allow-state-780"><input id="allow-state-780" type="checkbox" role="switch"><span>兼容新版 780 状态（实验）</span></label></div>
+          <p class="help">仅在无法取得 292/332 时开启。780 仍须通过业务出口复验；复验返回的新票和 Cookie 会滚动保存，返回 312、模型不一致或请求失败时仍会丢弃。</p>
           <label for="upstream-proxy-url">第一层：S5/HTTP 代理地址（两种方式共用）</label>
           <div class="input-action"><input id="upstream-proxy-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="socks5h://user:pass@proxy.example:1080"><button id="toggle-upstream-proxy" type="button" class="secondary" aria-controls="upstream-proxy-url" aria-pressed="false">显示</button></div>
           <p id="upstream-proxy-help" class="help">直接粘贴完整地址，用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。官方 0.2.8 插件页不提供 IP 管理代理列表。</p>
@@ -107,7 +109,7 @@
             <div><label for="attempt-interval-seconds">常规重试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>
           </div>
-          <p class="help">生成出口被地区过滤时会立即换出口，不等待常规重试间隔。新票通过同出口复验并保存成功后才进入可用状态；续期期间旧票继续服务。</p>
+          <p class="help">生成出口被地区过滤时会立即换出口，不等待常规重试间隔。新票通过业务出口复验并保存成功后才进入可用状态；复验响应中的新票和 Cookie 会滚动更新，续期期间旧票继续服务。</p>
         </details>
       </fieldset>
 

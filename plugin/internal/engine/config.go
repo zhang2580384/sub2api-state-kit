@@ -17,13 +17,14 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.3.1"
+const Version = "4.3.2"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
 const (
 	defaultRequestTimezone = "Asia/Singapore"
 	defaultAcceptLanguage  = "en-US,en;q=0.9"
+	compatStateLength      = 780
 )
 
 const (
@@ -52,6 +53,7 @@ type Config struct {
 	ProxyGeneratorBlockedCountries []string `json:"proxy_generator_blocked_countries"`
 	ProxyGeneratorTTLMinutes       int      `json:"proxy_generator_ttl_minutes"`
 	PreferPreviousIP               bool     `json:"prefer_previous_ip"`
+	AllowState780                  bool     `json:"allow_state_780"`
 	TicketMode                     string   `json:"ticket_mode"`
 	CookieCaptureMode              string   `json:"cookie_capture_mode"`
 	CookieCaptureProxyURL          string   `json:"cookie_capture_proxy_url"`
@@ -461,11 +463,12 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v6", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+	return digest("v7", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
 		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
 		c.TicketMode, c.CookieCaptureMode, c.CookieCaptureProxyURL, c.CookieBusinessProxyURL,
 		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),
 		strconv.FormatBool(c.RequestRewriteEnabled), c.DefaultRequestTimezone,
+		strconv.FormatBool(c.AllowState780),
 		a.Plan, model, jsonText(struct {
 			ID             int64
 			TTL            int
@@ -520,6 +523,13 @@ func targetLength(plan string) int {
 		return 332
 	}
 	return 292
+}
+
+func validPlanState(s string, plan string, allowState780 bool) bool {
+	if validState(s, targetLength(plan)) {
+		return true
+	}
+	return allowState780 && validState(s, compatStateLength)
 }
 
 // STATE is opaque: only token-safe bytes and expected length are checked.

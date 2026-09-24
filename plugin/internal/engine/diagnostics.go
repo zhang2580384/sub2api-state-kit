@@ -129,6 +129,8 @@ func stateDiagnosticClass(state string) string {
 		return "312"
 	case validState(state, 332):
 		return "332"
+	case validState(state, compatStateLength):
+		return "780"
 	default:
 		return "other"
 	}

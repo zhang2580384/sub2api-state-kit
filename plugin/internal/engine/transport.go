@@ -552,7 +552,7 @@ func (e *Engine) updateTicketSession(receipt *receipt, response *http.Response) 
 		}
 		mergeResponseCookies(t.Cookies, responseCookies)
 	}
-	if responseState != "" && len(responseState) == len(t.State) && (validState(responseState, 292) || validState(responseState, 332)) {
+	if responseState != "" && validPlanState(responseState, t.Plan, e.config.AllowState780) {
 		t.State = responseState
 	}
 }

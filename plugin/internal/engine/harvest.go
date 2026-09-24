@@ -353,7 +353,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			}
 			continue
 		}
-		if !validState(candidate, targetLength(a.Plan)) {
+		if !validPlanState(candidate, a.Plan, c.AllowState780) {
 			reason = "unexpected_state_length"
 			captureEvent.Outcome = "unexpected_state"
 			e.recordDiagnostic(captureEvent)
@@ -453,6 +453,16 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			}
 			continue
 		}
+		validatedState := candidate
+		if returned != "" {
+			if !validPlanState(returned, a.Plan, c.AllowState780) {
+				reason = "unexpected_state_length"
+				validationEvent.Outcome = "unexpected_state"
+				e.recordDiagnostic(validationEvent)
+				continue
+			}
+			validatedState = returned
+		}
 		if cookieMode && (sessionID == "" || len(cookies) == 0) {
 			reason = "cookie_session_incomplete"
 			validationEvent.Outcome = "session_incomplete"
@@ -466,7 +476,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		if generatorMode && !cookieMode {
 			generatedProxyURL = fixedProxyURL
 		}
-		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: candidate, Version: randomID(),
+		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: validatedState, Version: randomID(),
 			ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), GeneratedProxyURL: generatedProxyURL,
 			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured,
 			ExpiresAt: captured.Add(effectiveTicketTTL(c, a)), TicketMode: c.TicketMode,
