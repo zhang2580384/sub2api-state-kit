@@ -17,10 +17,17 @@ type completionObserver struct {
 	lineOverflow, eventOverflow, bodyOverflow bool
 	complete, matches                         bool
 	actualModel                               string
+	outputText                                []byte
+	outputOverflow                            bool
+	outputTextKeys                            map[string]bool
 }
 
 func newCompletionObserver(expected string) *completionObserver {
-	return &completionObserver{expected: expected, matches: true}
+	return &completionObserver{
+		expected:       expected,
+		matches:        true,
+		outputTextKeys: map[string]bool{},
+	}
 }
 
 func (o *completionObserver) Write(p []byte) {
@@ -103,6 +110,8 @@ func (o *completionObserver) inspect(data []byte) {
 		Object   string          `json:"object"`
 		Status   string          `json:"status"`
 		Model    string          `json:"model"`
+		ItemID   string          `json:"item_id"`
+		Text     string          `json:"text"`
 		Error    json.RawMessage `json:"error"`
 		Response *struct {
 			Status string          `json:"status"`
@@ -112,6 +121,21 @@ func (o *completionObserver) inspect(data []byte) {
 	}
 	if json.Unmarshal(data, &value) != nil {
 		return
+	}
+	if value.Type == "response.output_text.done" && value.Text != "" {
+		key := value.ItemID
+		if key == "" {
+			key = value.Text
+		}
+		if !o.outputTextKeys[key] {
+			o.outputTextKeys[key] = true
+			if len(o.outputText)+len(value.Text) > maxObservedFrame {
+				o.outputText = nil
+				o.outputOverflow = true
+			} else if !o.outputOverflow {
+				o.outputText = append(o.outputText, value.Text...)
+			}
+		}
 	}
 	model := ""
 	if value.Type == "response.completed" && value.Response != nil && noResponseError(value.Error) && noResponseError(value.Response.Error) &&
@@ -132,6 +156,13 @@ func (o *completionObserver) inspect(data []byte) {
 
 func (o *completionObserver) ActualModel() string {
 	return o.actualModel
+}
+
+func (o *completionObserver) OutputText() string {
+	if o.outputOverflow {
+		return ""
+	}
+	return string(o.outputText)
 }
 
 func noResponseError(raw json.RawMessage) bool {

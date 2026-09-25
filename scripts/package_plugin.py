@@ -15,7 +15,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugin"
-VERSION = "4.5.2"
+VERSION = "4.6.0"
 PLUGIN_ID = "io.github.wangyunjeff.sub2api-state-kit"
 KEY_ID = "state-kit-local-v1"
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-arm64")
@@ -138,7 +138,7 @@ def build(args):
                 files[path.relative_to(PLUGIN).as_posix()] = path.read_bytes()
         manifest = {
             "schema_version": 1, "id": PLUGIN_ID, "name": "STATE Kit · 账号级票据",
-            "version": VERSION, "description": "按账号启用 Pro / Team STATE，支持稳定同出口与 Cookie 分流，覆盖生成器或 S5/HTTP 打票、备用票、上一轮 IP 复用、地区过滤、请求时区与语言统一、实时诊断和异常重采。",
+            "version": VERSION, "description": "按账号启用 Pro / Team STATE，支持稳定同出口与 Cookie 分流，覆盖生成器或 S5/HTTP 打票、可选质量探针、备用票、上一轮 IP 复用、地区过滤、请求时区与语言统一、实时诊断和异常重采。",
             "author": "zhang2580384 / Sub2API STATE Kit",
             "requires": {"sub2api": ">=0.2.8 <0.3.0", "recommended_sub2api_version": "0.2.8", "tested_sub2api_versions": ["0.2.8"], "plugin_protocol": 1, "transport_api": 1, "ui_bridge": 1},
             "capabilities": [{"id": "openai.oauth.outbound_transport.v1", "platform": "openai", "account_type": "oauth"}],

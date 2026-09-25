@@ -65,3 +65,42 @@ func TestCompletionObserverMismatchCannotBeHiddenByLaterMatch(t *testing.T) {
 		t.Fatal("later match hid a mismatch")
 	}
 }
+
+func TestCompletionObserverCapturesFinalOutputOnce(t *testing.T) {
+	body := "event: response.output_text.done\n" +
+		"data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg-1\",\"text\":\"iPhone 17\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"model\":\"gpt-test\"}}\n\n"
+	for chunkSize := 1; chunkSize <= len(body)+1; chunkSize += 7 {
+		o := newCompletionObserver("gpt-test")
+		for pos := 0; pos < len(body); pos += chunkSize {
+			end := pos + chunkSize
+			if end > len(body) {
+				end = len(body)
+			}
+			o.Write([]byte(body[pos:end]))
+		}
+		o.Finish()
+		if got := o.OutputText(); got != "iPhone 17" {
+			t.Fatalf("chunks %d: output = %q", chunkSize, got)
+		}
+	}
+}
+
+func TestQualityAnswerMatchesConfiguredValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, accepted string
+		want                   bool
+	}{
+		{"case insensitive", "iPhone 17 Pro", "17", true},
+		{"alternate accepted value", "iPhone 17 Pro", "16,iphone 17", true},
+		{"missing", "iPhone 16 Pro", "17", false},
+		{"empty output", "", "17", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := qualityAnswerMatches(tc.output, tc.accepted); got != tc.want {
+				t.Fatalf("qualityAnswerMatches(%q,%q) = %v; want %v", tc.output, tc.accepted, got, tc.want)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -93,6 +94,11 @@ func completed(w http.ResponseWriter, model string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"model\":%q}}\n\n", model)
 }
+func completedWithText(w http.ResponseWriter, model, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	fmt.Fprintf(w, "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"msg-test\",\"text\":%q}\n\n", text)
+	completed(w, model)
+}
 func testConfig(proxy string, ids ...int64) Config {
 	c := DefaultConfig()
 	c.Enabled = true
@@ -142,10 +148,11 @@ func TestConfigStrictIsolation(t *testing.T) {
 	c, err := ParseConfig([]byte(`{}`))
 	if err != nil || c.Enabled || c.TTLMinutes != 180 || c.RefreshBeforeSeconds != 120 || c.PreferPreviousIP ||
 		c.GatewayPolicy != gatewayPolicyAllow || c.TargetGateway != "unified-15,unified-88,unified-180" ||
-		!c.RouteCookieReuse || !c.MintFingerprintConvergence || len(c.Accounts) != 0 {
+		!c.RouteCookieReuse || !c.MintFingerprintConvergence || c.QualityProbeEnabled ||
+		c.QualityProbePrompt != "" || c.QualityProbeAccept != "" || len(c.Accounts) != 0 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
-	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"proxy_generator_ttl_minutes":181}`, `{"target_gateway":"unified-abc"}`, `{"target_gateway":"https://gateway.example"}`, `{"target_gateway":"any,unified-88"}`, `{"gateway_policy":"blocked"}`, `{"gateway_policy":"allow","target_gateway":"any"}`, `{"gateway_policy":"deny","target_gateway":""}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`}
+	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"proxy_generator_ttl_minutes":181}`, `{"target_gateway":"unified-abc"}`, `{"target_gateway":"https://gateway.example"}`, `{"target_gateway":"any,unified-88"}`, `{"gateway_policy":"blocked"}`, `{"gateway_policy":"allow","target_gateway":"any"}`, `{"gateway_policy":"deny","target_gateway":""}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`, `{"quality_probe_enabled":true}`, `{"quality_probe_enabled":true,"quality_probe_prompt":"probe"}`, `{"quality_probe_enabled":true,"quality_probe_prompt":"probe","quality_probe_accept":",17"}`, `{"quality_probe_accept":"1,2,3,4,5,6,7,8,9"}`}
 	for _, raw := range bad {
 		if _, err := ParseConfig([]byte(raw)); err == nil {
 			t.Errorf("accepted invalid config %s", raw)
@@ -199,6 +206,10 @@ func TestConfigStrictIsolation(t *testing.T) {
 	anyPolicy, err := ParseConfig([]byte(`{"gateway_policy":"any","target_gateway":"unified-88"}`))
 	if err != nil || anyPolicy.GatewayPolicy != gatewayPolicyAny || anyPolicy.TargetGateway != "" {
 		t.Fatalf("explicit any gateway policy was not normalized: %+v %v", anyPolicy, err)
+	}
+	quality, err := ParseConfig([]byte(`{"quality_probe_enabled":true,"quality_probe_prompt":"probe","quality_probe_accept":" 17, iphone 17 ,17"}`))
+	if err != nil || !quality.QualityProbeEnabled || quality.QualityProbePrompt != "probe" || quality.QualityProbeAccept != "17,iphone 17" {
+		t.Fatalf("quality probe config was not normalized: %+v %v", quality, err)
 	}
 }
 
@@ -306,6 +317,67 @@ func TestCollectFixedProxyValidationAndPersistence(t *testing.T) {
 	waitFor(t, e2, "ready")
 	if dynamic.Load() != 1 || fixed.Load() < 2 {
 		t.Fatalf("restart did not revalidate KV ticket: dynamic=%d fixed=%d", dynamic.Load(), fixed.Load())
+	}
+}
+
+func TestQualityProbeGatesNewTicket(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, wantState string
+		convergence           bool
+	}{
+		{"matched", "iPhone 17", "ready", true},
+		{"matched without fingerprint convergence", "iPhone 17", "ready", false},
+		{"mismatch", "iPhone 16", "cooldown", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := testHost(42)
+			pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(StateHeader, testState(292))
+				completed(w, "gpt-6-astra")
+			}))
+			defer pool.Close()
+			var businessCalls atomic.Int32
+			business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				call := businessCalls.Add(1)
+				if r.Header.Get(StateHeader) != testState(292) {
+					t.Error("business request lost STATE")
+				}
+				if call == 1 {
+					completed(w, "gpt-6-astra")
+					return
+				}
+				var payload struct {
+					Instructions string `json:"instructions"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Errorf("decode quality payload: %v", err)
+				}
+				if strings.Contains(strings.ToLower(payload.Instructions), "pong") {
+					t.Errorf("quality probe was forced to pong: %q", payload.Instructions)
+				}
+				completedWithText(w, "gpt-6-astra", tc.text)
+			}))
+			defer business.Close()
+
+			e := testEngine(t, h, business.URL)
+			c := testConfig(pool.URL, 42)
+			c.QualityProbeEnabled = true
+			c.QualityProbePrompt = "quality prompt"
+			c.QualityProbeAccept = "17"
+			c.MintFingerprintConvergence = tc.convergence
+			apply(t, e, c)
+			waitFor(t, e, tc.wantState)
+			if businessCalls.Load() != 2 {
+				t.Fatalf("business calls = %d; want 2", businessCalls.Load())
+			}
+			if tc.wantState == "cooldown" {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+				if !strings.Contains(e.records[keyFor(42, "gpt-6-astra")].LastError, "quality_mismatch") {
+					t.Fatalf("last error = %q", e.records[keyFor(42, "gpt-6-astra")].LastError)
+				}
+			}
+		})
 	}
 }
 

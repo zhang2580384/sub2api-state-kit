@@ -510,6 +510,105 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		validationEvent.Outcome = "accepted"
 		e.recordDiagnostic(validationEvent)
+		if c.QualityProbeEnabled {
+			qualityStarted := time.Now()
+			qualityResult, qualityErr := e.probeWithPrompt(
+				ctx,
+				fixed,
+				model,
+				fixedProxyURL,
+				fixedUpstreamProxyURL,
+				validatedState,
+				sessionID,
+				cookies,
+				c.MintFingerprintConvergence,
+				c.QualityProbePrompt,
+				"",
+				false,
+			)
+			qualityState, qualityStatus, qualityModel := qualityResult.State, qualityResult.Status, qualityResult.Model
+			qualityEvent := diagnosticEvent{
+				AccountID:          a.AccountID,
+				Model:              model,
+				Stage:              "quality",
+				Attempt:            attempt,
+				UpstreamProxy:      fixedUpstreamProxyURL,
+				TargetProxy:        fixedProxyURL,
+				CaptureEgress:      captureEgress,
+				FixedEgress:        fixedEgress,
+				EgressMatch:        egressMatch(captureEgress, fixedEgress),
+				StateLength:        len(qualityState),
+				StateClass:         stateDiagnosticClass(qualityState),
+				StateFingerprint:   stateFingerprint(qualityState),
+				TicketAgeSeconds:   stateAgeSeconds(qualityState, time.Now()),
+				ResponseModel:      qualityModel,
+				Quality:            "failed",
+				QualityFingerprint: qualityOutputFingerprint(qualityResult.OutputText),
+				HTTPStatus:         qualityStatus,
+				DurationMS:         time.Since(qualityStarted).Milliseconds(),
+			}
+			if qualityErr != nil {
+				reason = "quality_probe_failed"
+				qualityEvent.Outcome = "probe_failed"
+				qualityEvent.Error = qualityErr.Error()
+				e.recordDiagnostic(qualityEvent)
+				if isStopStatus(qualityStatus) {
+					reason = stopReason(qualityStatus)
+					return
+				}
+				continue
+			}
+			if !qualityAnswerMatches(qualityResult.OutputText, c.QualityProbeAccept) {
+				reason = "quality_mismatch"
+				qualityEvent.Outcome = "quality_mismatch"
+				e.recordDiagnostic(qualityEvent)
+				continue
+			}
+			if validState(qualityState, 312) {
+				reason = "quality_state_312"
+				qualityEvent.Outcome = "state_312"
+				e.recordDiagnostic(qualityEvent)
+				continue
+			}
+			if qualityState != "" {
+				if !validPlanState(qualityState, a.Plan, c.AllowState780) {
+					reason = "quality_unexpected_state"
+					qualityEvent.Outcome = "unexpected_state"
+					e.recordDiagnostic(qualityEvent)
+					continue
+				}
+				validatedState = qualityState
+			}
+			cookies = qualityResult.Cookies
+			if c.RouteCookieReuse {
+				e.rememberRouteCookies(a.AccountID, cookies, c.GatewayPolicy, c.TargetGateway)
+			}
+			qualityEvent.StateLength = len(validatedState)
+			qualityEvent.StateClass = stateDiagnosticClass(validatedState)
+			qualityEvent.StateFingerprint = stateFingerprint(validatedState)
+			qualityEvent.TicketAgeSeconds = stateAgeSeconds(validatedState, time.Now())
+			qualityEvent.Gateway = gatewayFromCookies(cookies)
+			qualityEvent.CookieFingerprint = cookieFingerprint(cookies)
+			if _, gatewayReason := routeGatewayAcceptance(validatedState, cookies, c.GatewayPolicy, c.TargetGateway); gatewayReason != "" {
+				reason = "quality_" + gatewayReason
+				qualityEvent.Outcome = gatewayReason
+				qualityEvent.Error = reason
+				e.recordDiagnostic(qualityEvent)
+				continue
+			}
+			if (cookieMode || stateRequiresSession(validatedState)) && !sessionArtifactsComplete(validatedState, sessionID, cookies) {
+				reason = "quality_session_incomplete"
+				qualityEvent.Outcome = "session_incomplete"
+				qualityEvent.Error = reason
+				e.recordDiagnostic(qualityEvent)
+				continue
+			}
+			qualityEvent.Quality = "matched"
+			qualityEvent.Outcome = "accepted"
+			e.recordDiagnostic(qualityEvent)
+		}
+		gateway = gatewayFromCookies(cookies)
+		sessionBound = cookieMode || stateRequiresSession(validatedState)
 		generatedProxyURL := ""
 		if generatorMode && !cookieMode {
 			generatedProxyURL = fixedProxyURL
@@ -548,7 +647,9 @@ func fastRetryReason(reason string) bool {
 	case "generator_region_blocked", "business_region_blocked", "sticky_egress_changed",
 		"unexpected_state_length", "fixed_proxy_validation_failed", "cookie_session_incomplete",
 		"state_session_incomplete", "expired_ticket",
-		"gateway_unavailable", "gateway_unknown", "gateway_mismatch":
+		"gateway_unavailable", "gateway_unknown", "gateway_mismatch",
+		"quality_state_312", "quality_unexpected_state", "quality_gateway_unavailable",
+		"quality_gateway_unknown", "quality_gateway_mismatch", "quality_session_incomplete":
 		return true
 	default:
 		return false
@@ -764,26 +865,34 @@ func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c 
 }
 
 type ticketProbeResult struct {
-	State     string
-	Status    int
-	Model     string
-	Cookies   map[string]string
-	SessionID string
+	State      string
+	Status     int
+	Model      string
+	OutputText string
+	Cookies    map[string]string
+	SessionID  string
 }
 
 func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundIdentityResponse, model, proxyURL, upstreamProxyURL, state, sessionID string, cookies map[string]string, fingerprintConvergence bool) (ticketProbeResult, error) {
+	return e.probeWithPrompt(ctx, identity, model, proxyURL, upstreamProxyURL, state, sessionID, cookies, fingerprintConvergence, "ping", "", true)
+}
+
+func (e *Engine) probeWithPrompt(ctx context.Context, identity *pluginv1.ResolveOutboundIdentityResponse, model, proxyURL, upstreamProxyURL, state, sessionID string, cookies map[string]string, fingerprintConvergence bool, prompt, instructions string, forcePong bool) (ticketProbeResult, error) {
 	result := ticketProbeResult{Cookies: cloneCookies(cookies), SessionID: sessionID}
 	if result.Cookies == nil {
 		result.Cookies = map[string]string{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	payload := map[string]any{"model": model, "store": false, "stream": true, "instructions": "", "input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}}}
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "ping"
+	}
+	payload := map[string]any{"model": model, "store": false, "stream": true, "instructions": instructions, "input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": prompt}}}}}
 	if fingerprintConvergence {
 		payload["reasoning"] = map[string]any{"effort": "low"}
 		payload["tool_choice"] = "auto"
 		payload["parallel_tool_calls"] = false
-	} else {
+	} else if forcePong {
 		payload["instructions"] = "Reply with exactly: pong"
 	}
 	body, _ := json.Marshal(payload)
@@ -868,12 +977,35 @@ func (e *Engine) probe(ctx context.Context, identity *pluginv1.ResolveOutboundId
 	}
 	observer.Finish()
 	result.Model = observer.ActualModel()
+	result.OutputText = observer.OutputText()
 	complete, matches := observer.Result()
 	if !complete || !matches {
 		return result, errors.New("probe did not complete with requested model")
 	}
 	result.State = strings.TrimSpace(response.Header.Get(StateHeader))
 	return result, nil
+}
+
+func qualityAnswerMatches(output, accepted string) bool {
+	output = strings.ToLower(strings.TrimSpace(output))
+	if output == "" {
+		return false
+	}
+	for _, value := range strings.Split(accepted, ",") {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" && strings.Contains(output, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func qualityOutputFingerprint(output string) string {
+	output = strings.Join(strings.Fields(output), " ")
+	if output == "" {
+		return ""
+	}
+	return digest(output)
 }
 
 func cookieHeader(cookies map[string]string) string {

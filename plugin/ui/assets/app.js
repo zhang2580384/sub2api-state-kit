@@ -9,6 +9,7 @@
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
     allow_state_780: false, state_780_ttl_seconds: 240, gateway_policy: 'allow', target_gateway: 'unified-15,unified-88,unified-180',
     route_cookie_reuse: true, mint_fingerprint_convergence: true,
+    quality_probe_enabled: false, quality_probe_prompt: '', quality_probe_accept: '',
     ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
     cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
     request_rewrite_enabled: false, default_request_timezone: 'Asia/Singapore',
@@ -44,7 +45,13 @@
     ticket_persistence_failed: '票据保存失败', upstream_unauthorized: '上游拒绝授权（401）', upstream_forbidden: '上游拒绝访问（403）',
     upstream_rate_limited: '上游限流（429）', upstream_rejected: '上游拒绝请求', model_mismatch: '返回模型不匹配，正在重新获取票据',
     state_312: '收到 312 状态，正在重新获取票据', model_mismatch_persistence_failed: '返回模型不匹配，票据失效记录保存失败',
-    state_312_persistence_failed: '收到 312 状态，票据失效记录保存失败' });
+    state_312_persistence_failed: '收到 312 状态，票据失效记录保存失败',
+    quality_probe_failed: '质量探针请求失败，正在重新获取票据', quality_mismatch: '票据未通过质量门槛，正在重新获取',
+    quality_state_312: '质量探针收到 312 状态，正在重新获取票据', quality_unexpected_state: '质量探针返回了不支持的票据长度',
+    quality_session_incomplete: '质量探针会话不完整，正在重新获取票据',
+    quality_gateway_unavailable: '质量探针未取得目标网关，正在重新获取票据',
+    quality_gateway_unknown: '质量探针网关无法识别，正在重新获取票据',
+    quality_gateway_mismatch: '质量探针落到非目标网关，正在重新获取票据' });
   const MESSAGES = Object.freeze({ 'STATE disabled; requests use the account business proxy': 'STATE 已关闭，请求使用账号原有业务代理。',
     'STATE active only for explicitly enabled account/model pairs': 'STATE 仅对手动开启的账号与模型生效。',
     'waiting for host services': '正在等待宿主服务初始化。' });
@@ -166,6 +173,25 @@
     if (!['allow', 'deny', 'any'].includes(policy)) throw new Error('网关策略须选择 allow、deny 或 any。');
     return policy;
   }
+  function normalizeQualityProbeAccept(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const parts = raw.split(',').map(function (part) { return part.trim(); });
+    if (parts.length > 8) throw new Error('质量通过答案最多填写 8 个。');
+    const seen = new Set();
+    const values = [];
+    parts.forEach(function (part) {
+      if (!part || Array.from(part).length > 64 || /[\u0000-\u001f\u007f]/.test(part)) {
+        throw new Error('质量通过答案不能为空、过长或包含控制字符。');
+      }
+      const normalized = part.toLowerCase();
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        values.push(normalized);
+      }
+    });
+    return values.join(',');
+  }
   function normalizeConfig(input) {
     const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
     const config = Object.assign({}, DEFAULT_CONFIG, { proxy_generator_blocked_countries: DEFAULT_CONFIG.proxy_generator_blocked_countries.slice() });
@@ -204,6 +230,15 @@
     if (typeof config.allow_state_780 !== 'boolean') throw new Error('780 状态兼容开关格式不正确。');
     if (typeof config.route_cookie_reuse !== 'boolean') throw new Error('网关 Cookie 复用开关格式不正确。');
     if (typeof config.mint_fingerprint_convergence !== 'boolean') throw new Error('打票指纹收敛开关格式不正确。');
+    if (typeof config.quality_probe_enabled !== 'boolean') throw new Error('质量探针开关格式不正确。');
+    config.quality_probe_prompt = typeof config.quality_probe_prompt === 'string' ? config.quality_probe_prompt.trim() : '';
+    if (Array.from(config.quality_probe_prompt).length > 1000 || /[\u0000-\u001f\u007f]/.test(config.quality_probe_prompt)) {
+      throw new Error('质量探针提示词过长或包含控制字符。');
+    }
+    config.quality_probe_accept = normalizeQualityProbeAccept(config.quality_probe_accept);
+    if (config.quality_probe_enabled && (!config.quality_probe_prompt || !config.quality_probe_accept)) {
+      throw new Error('启用质量探针后，必须填写提示词和至少一个通过答案。');
+    }
     config.gateway_policy = normalizeGatewayPolicy(config.gateway_policy);
     if (config.gateway_policy === 'any') {
       config.target_gateway = '';
@@ -277,7 +312,7 @@
   function stateLabel(state) { return Object.prototype.hasOwnProperty.call(STATES, state) ? STATES[state] : ['未知状态', 'warning']; }
   function errorLabel(code) { return Object.prototype.hasOwnProperty.call(ERRORS, code) ? ERRORS[code] : '操作未完成，请检查账号与插件设置。'; }
   function diagnosticStageLabel(stage) {
-    return ({ capture: '采集票据', fixed_validation: '同出口复验', restore: '恢复复验',
+    return ({ capture: '采集票据', fixed_validation: '同出口复验', quality: '质量探针', restore: '恢复复验',
       ticket_lookup: '票据查询', business: '业务请求', business_result: '业务结果' })[stage] || '未知阶段';
   }
   function diagnosticOutcomeLabel(outcome) {
@@ -289,7 +324,8 @@
       upstream_transport_tls: 'TLS 失败', upstream_transport_timeout: '传输超时', upstream_transport_reset: '连接重置',
       generator_failed: '生成器调用失败', egress_unavailable: '出口不可用', region_blocked: '地区被阻止',
       egress_changed: '出口 IP 不一致', session_incomplete: '会话不完整',
-      gateway_unavailable: '未取得目标网关', gateway_unknown: '网关无法识别', gateway_mismatch: '网关不匹配' })[outcome] || '未知结果';
+      gateway_unavailable: '未取得目标网关', gateway_unknown: '网关无法识别', gateway_mismatch: '网关不匹配',
+      quality_mismatch: '质量未通过' })[outcome] || '未知结果';
   }
   function diagnosticGatewayStats(events) {
     const stats = new Map();
@@ -339,6 +375,8 @@
       cookie_fingerprint: safeDiagnosticText(event.cookie_fingerprint, 16),
       session_bound: event.session_bound === true,
       response_model: responseModel,
+      quality: safeDiagnosticText(event.quality, 32),
+      quality_fingerprint: safeDiagnosticText(event.quality_fingerprint, 16),
       http_status: Number.isSafeInteger(event.http_status) && event.http_status >= 100 && event.http_status <= 599 ? event.http_status : 0,
       outcome: safeDiagnosticText(event.outcome, 64),
       error: safeDiagnosticText(event.error, 80),
@@ -514,6 +552,14 @@
       byID('target-gateway').disabled = unrestricted;
       byID('target-gateway').required = !unrestricted;
     }
+    function renderQualityProbe() {
+      const enabled = byID('quality-probe-enabled').checked;
+      byID('quality-probe-fields').hidden = !enabled;
+      byID('quality-probe-prompt').disabled = !enabled;
+      byID('quality-probe-accept').disabled = !enabled;
+      byID('quality-probe-prompt').required = enabled;
+      byID('quality-probe-accept').required = enabled;
+    }
     function renderTicketMode() {
       const cookieMode = byID('ticket-mode').value === 'cookie';
       const generatorCapture = !cookieMode || byID('cookie-capture-mode').value === 'generator';
@@ -527,6 +573,7 @@
       byID('standby-ticket-enabled').disabled = false;
       byID('standby-lead-seconds').disabled = !byID('standby-ticket-enabled').checked;
       renderGatewayPolicy();
+      renderQualityProbe();
     }
     function setBusy(value) {
       busy = value;
@@ -664,6 +711,9 @@
       byID('allow-state-780').checked = config.allow_state_780 === true;
       byID('route-cookie-reuse').checked = config.route_cookie_reuse === true;
       byID('mint-fingerprint-convergence').checked = config.mint_fingerprint_convergence === true;
+      byID('quality-probe-enabled').checked = config.quality_probe_enabled === true;
+      byID('quality-probe-prompt').value = config.quality_probe_prompt;
+      byID('quality-probe-accept').value = config.quality_probe_accept;
       byID('gateway-policy').value = config.gateway_policy;
       byID('target-gateway').value = config.target_gateway || '';
       byID('request-rewrite-enabled').checked = config.request_rewrite_enabled === true;
@@ -692,6 +742,9 @@
         allow_state_780: byID('allow-state-780').checked,
         route_cookie_reuse: byID('route-cookie-reuse').checked,
         mint_fingerprint_convergence: byID('mint-fingerprint-convergence').checked,
+        quality_probe_enabled: byID('quality-probe-enabled').checked,
+        quality_probe_prompt: byID('quality-probe-prompt').value,
+        quality_probe_accept: byID('quality-probe-accept').value,
         gateway_policy: byID('gateway-policy').value,
         target_gateway: byID('target-gateway').value.trim(),
         request_rewrite_enabled: byID('request-rewrite-enabled').checked,
@@ -773,6 +826,7 @@
         const state = element('td', (event.state_class || '—') + (event.state_length ? ' · ' + event.state_length : ''));
         if (event.ticket_age_seconds) state.appendChild(element('div', '票龄 ' + event.ticket_age_seconds + ' 秒', 'diagnostic-sub'));
         if (event.gateway) state.appendChild(element('div', event.gateway, 'diagnostic-sub'));
+        if (event.quality) state.appendChild(element('div', '质量：' + event.quality + (event.quality_fingerprint ? ' · ' + event.quality_fingerprint : ''), 'diagnostic-sub'));
         if (event.session_bound) state.appendChild(element('span', '会话绑定', 'badge success'));
         row.appendChild(state);
         row.appendChild(element('td', (event.http_status ? event.http_status + ' · ' : '') + (event.response_model || '—'), 'diagnostic-mono'));
@@ -825,6 +879,7 @@
     byID('cookie-capture-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
     byID('standby-ticket-enabled').addEventListener('change', function () { renderTicketMode(); markDirty(); });
     byID('gateway-policy').addEventListener('change', function () { renderGatewayPolicy(); markDirty(); });
+    byID('quality-probe-enabled').addEventListener('change', function () { renderQualityProbe(); markDirty(); });
     async function saveConfig(event) {
       event.preventDefault(); if (busy || !loaded) return;
       let config;
@@ -950,6 +1005,7 @@
             'fixed=' + (event.fixed_egress || 'unknown'), 'state=' + (event.state_class || 'unknown'), 'response=' + (event.response_model || 'unknown'),
             'age=' + (event.ticket_age_seconds || 0), 'gateway=' + (event.gateway || 'unknown'),
             'state_fingerprint=' + (event.state_fingerprint || 'unknown'), 'cookie_fingerprint=' + (event.cookie_fingerprint || 'unknown'),
+            'quality=' + (event.quality || 'unknown'), 'quality_fingerprint=' + (event.quality_fingerprint || 'unknown'),
             'session_bound=' + (event.session_bound ? 'true' : 'false'),
             'outcome=' + event.outcome, event.error].filter(Boolean).join('\t');
         }).join('\n');

@@ -17,7 +17,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.5.2"
+const Version = "4.6.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -67,6 +67,9 @@ type Config struct {
 	TargetGateway                  string   `json:"target_gateway"`
 	RouteCookieReuse               bool     `json:"route_cookie_reuse"`
 	MintFingerprintConvergence     bool     `json:"mint_fingerprint_convergence"`
+	QualityProbeEnabled            bool     `json:"quality_probe_enabled"`
+	QualityProbePrompt             string   `json:"quality_probe_prompt"`
+	QualityProbeAccept             string   `json:"quality_probe_accept"`
 	TicketMode                     string   `json:"ticket_mode"`
 	CookieCaptureMode              string   `json:"cookie_capture_mode"`
 	CookieCaptureProxyURL          string   `json:"cookie_capture_proxy_url"`
@@ -176,6 +179,19 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	c.CookieCaptureProxyURL = strings.TrimSpace(c.CookieCaptureProxyURL)
 	c.CookieBusinessProxyURL = strings.TrimSpace(c.CookieBusinessProxyURL)
+	qualityPrompt, err := cleanDisplayField(c.QualityProbePrompt, 1000, "quality_probe_prompt")
+	if err != nil {
+		return c, err
+	}
+	c.QualityProbePrompt = qualityPrompt
+	qualityAccept, err := normalizeQualityProbeAccept(c.QualityProbeAccept)
+	if err != nil {
+		return c, err
+	}
+	c.QualityProbeAccept = qualityAccept
+	if c.QualityProbeEnabled && (c.QualityProbePrompt == "" || c.QualityProbeAccept == "") {
+		return c, errors.New("quality probe requires a prompt and at least one accepted answer")
+	}
 	targetGateways, err := normalizeTargetGateways(c.TargetGateway)
 	if err != nil {
 		return c, err
@@ -505,6 +521,33 @@ func cleanDisplayField(raw string, maxRunes int, label string) (string, error) {
 	return value, nil
 }
 
+func normalizeQualityProbeAccept(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > 8 {
+		return "", errors.New("quality_probe_accept supports at most 8 values")
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value, err := cleanDisplayField(part, 64, "quality_probe_accept")
+		if err != nil {
+			return "", err
+		}
+		if value == "" {
+			return "", errors.New("quality_probe_accept contains an empty value")
+		}
+		value = strings.ToLower(value)
+		if !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return strings.Join(result, ","), nil
+}
+
 func validateProxy(raw string) error {
 	if raw == "" {
 		return nil
@@ -590,7 +633,7 @@ func digest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 func configFingerprint(c Config, a AccountConfig, model string) string {
-	return digest("v10", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
+	return digest("v11", c.UpstreamProxyURL, c.DynamicProxyURL, c.ProxyGeneratorURL,
 		strings.Join(c.ProxyGeneratorBlockedCountries, ","), strconv.Itoa(c.ProxyGeneratorTTLMinutes),
 		c.TicketMode, c.CookieCaptureMode, c.CookieCaptureProxyURL, c.CookieBusinessProxyURL,
 		strconv.Itoa(c.CookieTicketTTLSeconds), strconv.FormatBool(c.StandbyTicketEnabled), strconv.Itoa(c.StandbyLeadSeconds),
@@ -598,6 +641,7 @@ func configFingerprint(c Config, a AccountConfig, model string) string {
 		strconv.FormatBool(c.AllowState780), strconv.Itoa(c.State780TTLSeconds),
 		c.GatewayPolicy, c.TargetGateway,
 		strconv.FormatBool(c.RouteCookieReuse), strconv.FormatBool(c.MintFingerprintConvergence),
+		strconv.FormatBool(c.QualityProbeEnabled), c.QualityProbePrompt, c.QualityProbeAccept,
 		a.Plan, model, jsonText(struct {
 			ID             int64
 			TTL            int

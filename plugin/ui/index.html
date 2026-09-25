@@ -38,6 +38,14 @@
           <p class="help">复用 <code>__cflb/__oailb</code> 定向重打，减少落到错误网关的概率；网关 Cookie 过期或不可解析时自动回到裸打。</p>
           <div class="inline-switch"><label class="switch-label" for="mint-fingerprint-convergence"><input id="mint-fingerprint-convergence" type="checkbox" role="switch"><span>打票指纹收敛为 codex-tui</span></label></div>
           <p class="help">统一打票请求的客户端标识、推理参数和负载，减少同一账号被分配到不同模型指纹的概率。</p>
+          <div class="inline-switch"><label class="switch-label" for="quality-probe-enabled"><input id="quality-probe-enabled" type="checkbox" role="switch"><span>启用票据质量探针（可消耗额度）</span></label></div>
+          <div id="quality-probe-fields" hidden>
+            <label for="quality-probe-prompt">质量探针提示词</label>
+            <textarea id="quality-probe-prompt" rows="2" maxlength="1000" autocomplete="off" spellcheck="false" placeholder="例如：不要联网，不要猜测，说出你知道的最新苹果手机"></textarea>
+            <label for="quality-probe-accept">通过答案（逗号分隔，最多 8 个）</label>
+            <input id="quality-probe-accept" type="text" maxlength="512" autocomplete="off" spellcheck="false" placeholder="例如：17">
+            <p class="help">新票通过同出口复验后会再请求一次；答案包含任一通过值时才发布。未命中时旧票继续服务并重新打票。提示词会随请求发送给上游，请勿填写敏感信息。</p>
+          </div>
           <label for="upstream-proxy-url">第一层：S5/HTTP 代理地址（两种方式共用）</label>
           <div class="input-action"><input id="upstream-proxy-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="socks5h://user:pass@proxy.example:1080"><button id="toggle-upstream-proxy" type="button" class="secondary" aria-controls="upstream-proxy-url" aria-pressed="false">显示</button></div>
           <p id="upstream-proxy-help" class="help">直接粘贴完整地址，用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。官方 0.2.8 插件页不提供 IP 管理代理列表。</p>

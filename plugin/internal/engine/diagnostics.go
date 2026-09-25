@@ -23,29 +23,31 @@ const (
 // Raw STATE values, OAuth tokens, proxy credentials, and request headers are
 // never copied into runtime logs.
 type diagnosticEvent struct {
-	Seq               uint64 `json:"seq"`
-	Timestamp         string `json:"time"`
-	AccountID         int64  `json:"account_id,omitempty"`
-	Model             string `json:"model,omitempty"`
-	Stage             string `json:"stage"`
-	Attempt           int    `json:"attempt,omitempty"`
-	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
-	TargetProxy       string `json:"target_proxy,omitempty"`
-	CaptureEgress     string `json:"capture_egress,omitempty"`
-	FixedEgress       string `json:"fixed_egress,omitempty"`
-	EgressMatch       *bool  `json:"egress_match,omitempty"`
-	StateLength       int    `json:"state_length,omitempty"`
-	StateClass        string `json:"state_class,omitempty"`
-	StateFingerprint  string `json:"state_fingerprint,omitempty"`
-	TicketAgeSeconds  int64  `json:"ticket_age_seconds,omitempty"`
-	Gateway           string `json:"gateway,omitempty"`
-	CookieFingerprint string `json:"cookie_fingerprint,omitempty"`
-	SessionBound      bool   `json:"session_bound,omitempty"`
-	ResponseModel     string `json:"response_model,omitempty"`
-	HTTPStatus        int    `json:"http_status,omitempty"`
-	Outcome           string `json:"outcome"`
-	Error             string `json:"error,omitempty"`
-	DurationMS        int64  `json:"duration_ms,omitempty"`
+	Seq                uint64 `json:"seq"`
+	Timestamp          string `json:"time"`
+	AccountID          int64  `json:"account_id,omitempty"`
+	Model              string `json:"model,omitempty"`
+	Stage              string `json:"stage"`
+	Attempt            int    `json:"attempt,omitempty"`
+	UpstreamProxy      string `json:"upstream_proxy,omitempty"`
+	TargetProxy        string `json:"target_proxy,omitempty"`
+	CaptureEgress      string `json:"capture_egress,omitempty"`
+	FixedEgress        string `json:"fixed_egress,omitempty"`
+	EgressMatch        *bool  `json:"egress_match,omitempty"`
+	StateLength        int    `json:"state_length,omitempty"`
+	StateClass         string `json:"state_class,omitempty"`
+	StateFingerprint   string `json:"state_fingerprint,omitempty"`
+	TicketAgeSeconds   int64  `json:"ticket_age_seconds,omitempty"`
+	Gateway            string `json:"gateway,omitempty"`
+	CookieFingerprint  string `json:"cookie_fingerprint,omitempty"`
+	SessionBound       bool   `json:"session_bound,omitempty"`
+	ResponseModel      string `json:"response_model,omitempty"`
+	Quality            string `json:"quality,omitempty"`
+	QualityFingerprint string `json:"quality_fingerprint,omitempty"`
+	HTTPStatus         int    `json:"http_status,omitempty"`
+	Outcome            string `json:"outcome"`
+	Error              string `json:"error,omitempty"`
+	DurationMS         int64  `json:"duration_ms,omitempty"`
 }
 
 func (e *Engine) diagnosticsListeningLocked(now time.Time) bool {
@@ -104,6 +106,8 @@ func (e *Engine) recordDiagnostic(event diagnosticEvent) {
 		event.TicketAgeSeconds = 0
 	}
 	event.ResponseModel = safeDiagnosticModel(event.ResponseModel)
+	event.Quality = safeDiagnosticCode(event.Quality, 32)
+	event.QualityFingerprint = safeDiagnosticCode(event.QualityFingerprint, 16)
 	event.Outcome = safeDiagnosticCode(event.Outcome, 64)
 	event.Error = safeDiagnosticCode(event.Error, 80)
 	e.diagnostics = append(e.diagnostics, event)

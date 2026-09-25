@@ -27,6 +27,9 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({ gateway_policy: 'deny', target_gateway: '88' }).gateway_policy, 'deny');
   assert.equal(ui.normalizeConfig({}).route_cookie_reuse, true);
   assert.equal(ui.normalizeConfig({}).mint_fingerprint_convergence, true);
+  assert.equal(ui.normalizeConfig({}).quality_probe_enabled, false);
+  assert.equal(ui.normalizeConfig({}).quality_probe_prompt, '');
+  assert.equal(ui.normalizeConfig({}).quality_probe_accept, '');
   assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
   assert.equal(ui.normalizeConfig({}).cookie_capture_mode, 'generator');
   assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 300);
@@ -46,6 +49,17 @@ test('request timezone rewrite validates account overrides and restricted region
   assert.equal(ui.validateConfig(config).accounts[0].request_timezone, 'America/Los_Angeles');
   config.accounts[0].request_timezone = 'Asia/Taipei';
   assert.throws(() => ui.validateConfig(config), /不支持当前地区/);
+});
+
+test('quality probe is opt-in and normalizes accepted answer values', () => {
+  assert.doesNotThrow(() => ui.validateConfig(configured()));
+  const config = configured({ quality_probe_enabled: true });
+  assert.throws(() => ui.validateConfig(config), /质量探针/);
+  config.quality_probe_prompt = 'probe';
+  config.quality_probe_accept = ' 17, iPhone 17 ,17 ';
+  assert.equal(ui.validateConfig(config).quality_probe_accept, '17,iphone 17');
+  config.quality_probe_accept = '1,2,3,4,5,6,7,8,9';
+  assert.throws(() => ui.validateConfig(config), /最多填写 8 个/);
 });
 
 test('requires dynamic proxy only when global and account switches are both on', () => {
@@ -215,17 +229,20 @@ test('diagnostic events expose state classes and egress evidence without credent
     diagnostics: [{ seq: 9, time: '2026-09-21T12:00:00Z', account_id: 19, model: 'gpt-6-astra', stage: 'capture',
       upstream_proxy: 'socks5://user:secret@first.example:1081', target_proxy: 'socks5://user:secret@second.example:10000',
       capture_egress: '203.0.113.18', fixed_egress: '198.51.100.24', egress_match: false, state_length: 292,
-      state_class: '292', response_model: 'gpt-6-astra', http_status: 200, outcome: 'accepted', duration_ms: 123,
+      state_class: '292', response_model: 'gpt-6-astra', quality: 'matched', quality_fingerprint: 'abc123',
+      http_status: 200, outcome: 'accepted', duration_ms: 123,
       raw_state: 'gAAAAA-secret-state', token: 'secret-token' }]
   }) });
   assert.equal(parsed.diagnostics.length, 1);
   assert.equal(parsed.diagnostics[0].state_class, '292');
   assert.equal(parsed.diagnostics[0].capture_egress, '203.0.113.18');
   assert.equal(parsed.diagnostics[0].egress_match, false);
+  assert.equal(parsed.diagnostics[0].quality, 'matched');
   assert.equal(parsed.diagnostics_retained, 1);
   assert.equal(JSON.stringify(parsed).includes('secret'), false);
   assert.equal(JSON.stringify(parsed).includes('gAAAAA-secret-state'), false);
   assert.equal(ui.diagnosticStageLabel('capture'), '采集票据');
+  assert.equal(ui.diagnosticStageLabel('quality'), '质量探针');
   assert.equal(ui.diagnosticOutcomeLabel('state_312'), '收到 312');
   assert.deepEqual(ui.diagnosticGatewayStats([
     { gateway: 'unified-15', outcome: 'accepted' },
@@ -238,6 +255,18 @@ test('diagnostic events expose state classes and egress evidence without credent
     { gateway: 'unified-12', total: 1, passed: 0, rejected: 1, modelMismatch: 0, passRate: 0 },
     { gateway: 'unified-180', total: 1, passed: 0, rejected: 0, modelMismatch: 1, passRate: 0 }
   ]);
+});
+
+test('quality probe fields only enable after the opt-in switch is checked', async () => {
+  const h = uiHarness(); await settle();
+  assert.equal(h.get('quality-probe-fields').hidden, true);
+  assert.equal(h.get('quality-probe-prompt').disabled, true);
+  h.get('quality-probe-enabled').checked = true;
+  await h.get('quality-probe-enabled').fire('change');
+  assert.equal(h.get('quality-probe-fields').hidden, false);
+  assert.equal(h.get('quality-probe-prompt').disabled, false);
+  assert.equal(h.get('quality-probe-accept').disabled, false);
+  h.runtime.stop();
 });
 
 class Node {
