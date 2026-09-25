@@ -327,23 +327,41 @@
       gateway_unavailable: '未取得目标网关', gateway_unknown: '网关无法识别', gateway_mismatch: '网关不匹配',
       quality_mismatch: '质量未通过' })[outcome] || '未知结果';
   }
+  function diagnosticQualityLabel(value) {
+    return ({ matched: '质量通过', passed: '质量通过', failed: '质量未通过', mismatch: '质量未通过' })[value] || value || '未探测';
+  }
+  function diagnosticOutcomeClass(outcome) {
+    if (outcome === 'accepted' || outcome === 'model_match') return 'badge success';
+    if (outcome === 'model_mismatch' || outcome === 'state_312' || outcome === 'validation_failed' ||
+      outcome === 'quality_mismatch' || outcome === 'unexpected_state') return 'badge warning';
+    return 'badge error';
+  }
   function diagnosticGatewayStats(events) {
     const stats = new Map();
     (Array.isArray(events) ? events : []).forEach(function (event) {
       const gateway = event && typeof event.gateway === 'string' ? event.gateway : '';
       if (!/^unified-\d+$/.test(gateway)) return;
-      const item = stats.get(gateway) || { gateway: gateway, total: 0, passed: 0, rejected: 0, modelMismatch: 0 };
+      const item = stats.get(gateway) || {
+        gateway: gateway,
+        total: 0,
+        captureSuccess: 0,
+        validationPassed: 0,
+        qualityPassed: 0,
+        qualityFailed: 0,
+        otherFailed: 0
+      };
       item.total += 1;
-      if (event.outcome === 'accepted' || event.outcome === 'model_match') item.passed += 1;
-      if (event.outcome === 'model_mismatch') item.modelMismatch += 1;
-      if (['gateway_mismatch', 'gateway_unavailable', 'gateway_unknown', 'validation_failed',
-        'state_312', 'unexpected_state'].includes(event.outcome)) item.rejected += 1;
+      const passed = event.outcome === 'accepted' || event.outcome === 'model_match';
+      const qualityFailed = (event.stage === 'quality' && !passed) ||
+        ['quality_mismatch', 'probe_failed'].includes(event.outcome);
+      if (event.stage === 'capture' && passed) item.captureSuccess += 1;
+      else if (event.stage === 'fixed_validation' && passed) item.validationPassed += 1;
+      else if (event.stage === 'quality' && (passed || event.quality === 'matched' || event.quality === 'passed')) item.qualityPassed += 1;
+      else if (qualityFailed) item.qualityFailed += 1;
+      else if (!passed) item.otherFailed += 1;
       stats.set(gateway, item);
     });
-    return Array.from(stats.values()).map(function (item) {
-      item.passRate = item.total ? Math.round(item.passed * 100 / item.total) : 0;
-      return item;
-    }).sort(function (a, b) {
+    return Array.from(stats.values()).sort(function (a, b) {
       return b.total - a.total || Number(a.gateway.slice(8)) - Number(b.gateway.slice(8));
     });
   }
@@ -433,7 +451,6 @@
     let diagnosticsOpen = false;
     let diagnosticsListening = false;
     let diagnosticsTimer;
-    let diagnosticsDrag;
     let hostHeight = 0;
     let closed = false;
     let pollTimer;
@@ -453,88 +470,6 @@
       if (text !== undefined) node.textContent = String(text);
       if (className) node.className = className;
       return node;
-    }
-    function diagnosticsViewport() {
-      const width = global.innerWidth || document.documentElement.clientWidth || 1440;
-      const height = global.innerHeight || document.documentElement.clientHeight || 900;
-      return { width: width, height: height };
-    }
-    function savedDiagnosticsPosition() {
-      try {
-        const raw = global.sessionStorage && global.sessionStorage.getItem('sub2api-state-kit-diagnostics-position');
-        if (!raw) return null;
-        const value = JSON.parse(raw);
-        return Number.isFinite(value.left) && Number.isFinite(value.top) ? value : null;
-      } catch (_) {
-        return null;
-      }
-    }
-    function saveDiagnosticsPosition(left, top) {
-      try {
-        if (global.sessionStorage) global.sessionStorage.setItem('sub2api-state-kit-diagnostics-position', JSON.stringify({ left: left, top: top }));
-      } catch (_) {
-        // Session storage may be unavailable inside the host sandbox.
-      }
-    }
-    function clampDiagnosticsPosition(dialog, left, top) {
-      if (!dialog || typeof dialog.getBoundingClientRect !== 'function') return { left: left, top: top };
-      const rect = dialog.getBoundingClientRect();
-      const viewport = diagnosticsViewport();
-      const maxLeft = Math.max(0, viewport.width - rect.width);
-      const maxTop = Math.max(0, viewport.height - rect.height);
-      return {
-        left: Math.min(Math.max(0, left), maxLeft),
-        top: Math.min(Math.max(0, top), maxTop)
-      };
-    }
-    function placeDiagnosticsDialog(dialog) {
-      if (!dialog || !dialog.style || typeof dialog.getBoundingClientRect !== 'function') return;
-      const rect = dialog.getBoundingClientRect();
-      const viewport = diagnosticsViewport();
-      const saved = savedDiagnosticsPosition();
-      const centered = { left: Math.max(0, (viewport.width - rect.width) / 2), top: Math.max(0, (viewport.height - rect.height) / 2) };
-      const next = clampDiagnosticsPosition(dialog, saved ? saved.left : centered.left, saved ? saved.top : centered.top);
-      dialog.style.left = next.left + 'px';
-      dialog.style.top = next.top + 'px';
-    }
-    function moveDiagnosticsDialog(event) {
-      if (!diagnosticsDrag) return;
-      if (diagnosticsDrag.pointerId !== undefined && event.pointerId !== undefined && diagnosticsDrag.pointerId !== event.pointerId) return;
-      const dialog = byID('diagnostics-dialog');
-      if (!dialog || !dialog.style) return;
-      const next = clampDiagnosticsPosition(dialog, event.clientX - diagnosticsDrag.offsetX, event.clientY - diagnosticsDrag.offsetY);
-      dialog.style.left = next.left + 'px';
-      dialog.style.top = next.top + 'px';
-      diagnosticsDrag.left = next.left;
-      diagnosticsDrag.top = next.top;
-      if (event.preventDefault) event.preventDefault();
-    }
-    function endDiagnosticsDrag(event) {
-      if (!diagnosticsDrag || (diagnosticsDrag.pointerId !== undefined && event && event.pointerId !== undefined && diagnosticsDrag.pointerId !== event.pointerId)) return;
-      const position = { left: diagnosticsDrag.left, top: diagnosticsDrag.top };
-      diagnosticsDrag = undefined;
-      if (Number.isFinite(position.left) && Number.isFinite(position.top)) saveDiagnosticsPosition(position.left, position.top);
-    }
-    function startDiagnosticsDrag(event) {
-      if (event.button !== undefined && event.button !== 0) return;
-      const dialog = byID('diagnostics-dialog');
-      if (!dialog || typeof dialog.getBoundingClientRect !== 'function') return;
-      const rect = dialog.getBoundingClientRect();
-      diagnosticsDrag = {
-        pointerId: event.pointerId,
-        offsetX: event.clientX - rect.left,
-        offsetY: event.clientY - rect.top,
-        left: rect.left,
-        top: rect.top
-      };
-      const handle = byID('diagnostics-drag-handle');
-      if (handle && typeof handle.setPointerCapture === 'function' && event.pointerId !== undefined) {
-        try { handle.setPointerCapture(event.pointerId); } catch (_) { /* Pointer capture is optional. */ }
-      }
-      if (event.preventDefault) event.preventDefault();
-    }
-    function repositionDiagnosticsDialog() {
-      if (diagnosticsOpen) placeDiagnosticsDialog(byID('diagnostics-dialog'));
     }
     function notice(message, kind) {
       const node = byID('notice');
@@ -809,41 +744,59 @@
       body.replaceChildren();
       gatewaySummary.replaceChildren();
       lastDiagnostics.slice().reverse().forEach(function (event) {
-        const row = element('tr');
-        row.appendChild(element('td', event.time ? new Date(event.time).toLocaleString('zh-CN') : '—'));
-        const accountModel = element('td');
-        accountModel.appendChild(element('span', event.account_id ? '#' + event.account_id : '—', 'status-account'));
-        accountModel.appendChild(element('span', event.model || '—', 'status-model'));
-        row.appendChild(accountModel);
-        const stage = element('td', diagnosticStageLabel(event.stage));
-        if (event.attempt) stage.appendChild(element('div', '第 ' + event.attempt + ' 次', 'diagnostic-sub'));
-        row.appendChild(stage);
-        row.appendChild(element('td', [event.upstream_proxy, event.target_proxy].filter(Boolean).join(' → ') || '—', 'diagnostic-mono'));
-        const egress = element('td', '采集：' + (event.capture_egress || '未知') + '\n固定：' + (event.fixed_egress || '未知'), 'diagnostic-mono');
-        if (event.egress_match === true) egress.appendChild(element('span', '出口一致', 'badge success'));
-        else if (event.egress_match === false) egress.appendChild(element('span', '出口不一致', 'badge warning'));
-        row.appendChild(egress);
-        const state = element('td', (event.state_class || '—') + (event.state_length ? ' · ' + event.state_length : ''));
-        if (event.ticket_age_seconds) state.appendChild(element('div', '票龄 ' + event.ticket_age_seconds + ' 秒', 'diagnostic-sub'));
-        if (event.gateway) state.appendChild(element('div', event.gateway, 'diagnostic-sub'));
-        if (event.quality) state.appendChild(element('div', '质量：' + event.quality + (event.quality_fingerprint ? ' · ' + event.quality_fingerprint : ''), 'diagnostic-sub'));
-        if (event.session_bound) state.appendChild(element('span', '会话绑定', 'badge success'));
-        row.appendChild(state);
-        row.appendChild(element('td', (event.http_status ? event.http_status + ' · ' : '') + (event.response_model || '—'), 'diagnostic-mono'));
-        const outcome = element('td');
-        outcome.appendChild(element('span', diagnosticOutcomeLabel(event.outcome), event.outcome === 'accepted' || event.outcome === 'model_match' ? 'badge success' : event.outcome === 'model_mismatch' || event.outcome === 'state_312' || event.outcome === 'validation_failed' ? 'badge warning' : 'badge'));
-        if (event.error) outcome.appendChild(element('div', event.error, 'diagnostic-sub'));
-        row.appendChild(outcome);
-        row.appendChild(element('td', event.duration_ms ? event.duration_ms + ' ms' : '—'));
-        body.appendChild(row);
+        const card = element('article', 'diagnostic-event');
+        const head = element('div', 'diagnostic-event-head');
+        const identity = element('div', 'diagnostic-event-identity');
+        identity.appendChild(element('strong', event.account_id ? '#' + event.account_id : '未知账号'));
+        identity.appendChild(element('span', event.model || '未知模型', 'diagnostic-sub'));
+        head.appendChild(identity);
+        const badges = element('div', 'diagnostic-event-badges');
+        badges.appendChild(element('span', diagnosticStageLabel(event.stage), 'badge'));
+        if (event.attempt) badges.appendChild(element('span', '第 ' + event.attempt + ' 次', 'badge'));
+        badges.appendChild(element('span', diagnosticOutcomeLabel(event.outcome), diagnosticOutcomeClass(event.outcome)));
+        head.appendChild(badges);
+        card.appendChild(head);
+
+        const facts = element('div', 'diagnostic-facts');
+        function addFact(label, value, className) {
+          const fact = element('div', 'diagnostic-fact');
+          fact.appendChild(element('span', label, 'diagnostic-fact-label'));
+          fact.appendChild(element('div', value || '—', 'diagnostic-fact-value ' + (className || '')));
+          facts.appendChild(fact);
+        }
+        addFact('时间', event.time ? new Date(event.time).toLocaleString('zh-CN') : '—');
+        addFact('代理链', [event.upstream_proxy, event.target_proxy].filter(Boolean).join(' → ') || '—', 'diagnostic-mono');
+        const egress = '采集：' + (event.capture_egress || '未知') + ' · 固定：' + (event.fixed_egress || '未知') +
+          (event.egress_match === true ? ' · 出口一致' : event.egress_match === false ? ' · 出口不一致' : '');
+        addFact('出口 IP', egress, 'diagnostic-mono');
+        const stateText = event.state_class || (event.state_length ? String(event.state_length) : '未知状态');
+        const stateDetails = [];
+        if (event.state_length && event.state_class !== String(event.state_length)) stateDetails.push(event.state_length);
+        if (event.ticket_age_seconds) stateDetails.push('票龄 ' + event.ticket_age_seconds + ' 秒');
+        if (event.gateway) stateDetails.push(event.gateway);
+        if (event.session_bound) stateDetails.push('会话已绑定');
+        addFact('票据状态', stateText + (stateDetails.length ? ' · ' + stateDetails.join(' · ') : ''));
+        const quality = event.quality ? diagnosticQualityLabel(event.quality) :
+          event.stage === 'quality' && event.outcome === 'quality_mismatch' ? '质量未通过' : '未探测';
+        addFact('质量探针', quality + (event.quality_fingerprint ? ' · ' + event.quality_fingerprint : ''));
+        addFact('响应', (event.http_status ? event.http_status + ' · ' : '') + (event.response_model || '—'), 'diagnostic-mono');
+        if (event.error) addFact('详情', event.error);
+        addFact('耗时', event.duration_ms ? event.duration_ms + ' ms' : '—');
+        card.appendChild(facts);
+        body.appendChild(card);
       });
       const gatewayStats = diagnosticGatewayStats(lastDiagnostics);
       gatewayStats.forEach(function (stat) {
-        const parts = [stat.gateway, '出现 ' + stat.total, '通过 ' + stat.passed];
-        if (stat.modelMismatch) parts.push('模型不符 ' + stat.modelMismatch);
-        if (stat.rejected) parts.push('拒绝 ' + stat.rejected);
-        parts.push('通过率 ' + stat.passRate + '%');
-        gatewaySummary.appendChild(element('span', parts.join(' · '), 'diagnostic-gateway-stat'));
+        const card = element('div', 'diagnostic-gateway-stat');
+        card.appendChild(element('strong', stat.gateway));
+        const parts = [];
+        if (stat.captureSuccess) parts.push('采集成功 ' + stat.captureSuccess);
+        if (stat.validationPassed) parts.push('复验通过 ' + stat.validationPassed);
+        if (stat.qualityPassed) parts.push('质量通过 ' + stat.qualityPassed);
+        if (stat.qualityFailed) parts.push('质量未通过 ' + stat.qualityFailed);
+        if (stat.otherFailed) parts.push('其他失败 ' + stat.otherFailed);
+        card.appendChild(element('span', parts.join(' · ') || '仅记录到 ' + stat.total + ' 条事件', 'diagnostic-sub'));
+        gatewaySummary.appendChild(card);
       });
       gatewayPanel.hidden = gatewayStats.length === 0;
       byID('diagnostics-empty').hidden = lastDiagnostics.length !== 0;
@@ -980,14 +933,8 @@
       diagnosticsOpen = true;
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.hidden = false;
-      placeDiagnosticsDialog(dialog);
       await startDiagnosticsListening();
     });
-    byID('diagnostics-drag-handle').addEventListener('pointerdown', startDiagnosticsDrag);
-    global.addEventListener('pointermove', moveDiagnosticsDialog);
-    global.addEventListener('pointerup', endDiagnosticsDrag);
-    global.addEventListener('pointercancel', endDiagnosticsDrag);
-    global.addEventListener('resize', repositionDiagnosticsDialog);
     byID('diagnostics-refresh').addEventListener('click', refreshStatus);
     byID('diagnostics-close').addEventListener('click', function () {
       const dialog = byID('diagnostics-dialog');
@@ -1025,10 +972,6 @@
       closed = true; global.clearInterval(pollTimer);
       stopDiagnosticsListening();
       if (resizeObserver) resizeObserver.disconnect();
-      global.removeEventListener('pointermove', moveDiagnosticsDialog);
-      global.removeEventListener('pointerup', endDiagnosticsDrag);
-      global.removeEventListener('pointercancel', endDiagnosticsDrag);
-      global.removeEventListener('resize', repositionDiagnosticsDialog);
       if (bridge) bridge.dispose();
       global.removeEventListener('pagehide', stop);
     }
@@ -1051,6 +994,6 @@
     validateTimezone: validateTimezone,
     accountID: accountID, accountOptionLabel: accountOptionLabel, normalizeAccountCatalog: normalizeAccountCatalog,
     parseStatus: parseStatus, stateLabel: stateLabel, errorLabel: errorLabel, redactError: redactError, remainingText: remainingText,
-    diagnosticStageLabel: diagnosticStageLabel, diagnosticOutcomeLabel: diagnosticOutcomeLabel,
+    diagnosticStageLabel: diagnosticStageLabel, diagnosticOutcomeLabel: diagnosticOutcomeLabel, diagnosticQualityLabel: diagnosticQualityLabel,
     diagnosticGatewayStats: diagnosticGatewayStats, start: start };
 });

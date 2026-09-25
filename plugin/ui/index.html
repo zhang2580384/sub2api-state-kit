@@ -38,13 +38,13 @@
           <p class="help">复用 <code>__cflb/__oailb</code> 定向重打，减少落到错误网关的概率；网关 Cookie 过期或不可解析时自动回到裸打。</p>
           <div class="inline-switch"><label class="switch-label" for="mint-fingerprint-convergence"><input id="mint-fingerprint-convergence" type="checkbox" role="switch"><span>打票指纹收敛为 codex-tui</span></label></div>
           <p class="help">统一打票请求的客户端标识、推理参数和负载，减少同一账号被分配到不同模型指纹的概率。</p>
-          <div class="inline-switch"><label class="switch-label" for="quality-probe-enabled"><input id="quality-probe-enabled" type="checkbox" role="switch"><span>启用票据质量探针（可消耗额度）</span></label></div>
+          <div class="inline-switch"><label class="switch-label" for="quality-probe-enabled"><input id="quality-probe-enabled" type="checkbox" role="switch"><span>发布新票前启用质量探针（可消耗额度）</span></label></div>
           <div id="quality-probe-fields" hidden>
             <label for="quality-probe-prompt">质量探针提示词</label>
             <textarea id="quality-probe-prompt" rows="2" maxlength="1000" autocomplete="off" spellcheck="false" placeholder="例如：不要联网，不要猜测，说出你知道的最新苹果手机"></textarea>
             <label for="quality-probe-accept">通过答案（逗号分隔，最多 8 个）</label>
             <input id="quality-probe-accept" type="text" maxlength="512" autocomplete="off" spellcheck="false" placeholder="例如：17">
-            <p class="help">新票通过同出口复验后会再请求一次；答案包含任一通过值时才发布。未命中时旧票继续服务并重新打票。提示词会随请求发送给上游，请勿填写敏感信息。</p>
+            <p class="help">只用于发布新票前验收：新票通过同出口复验后会再请求一次，答案包含任一通过值才发布；未命中时旧票继续服务并重新打票。返回新的 <code>780</code> 只是会话滚动，不等于降智，也不能替代探针验收。提示词会随请求发送给上游，请勿填写敏感信息。</p>
           </div>
           <label for="upstream-proxy-url">第一层：S5/HTTP 代理地址（两种方式共用）</label>
           <div class="input-action"><input id="upstream-proxy-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="socks5h://user:pass@proxy.example:1080"><button id="toggle-upstream-proxy" type="button" class="secondary" aria-controls="upstream-proxy-url" aria-pressed="false">显示</button></div>
@@ -140,19 +140,28 @@
     </section>
   </main>
   <dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
-    <div class="diagnostics-head">
-      <div id="diagnostics-drag-handle" class="diagnostics-drag-handle" title="拖动此区域移动窗口">
-        <span class="diagnostics-drag-grip" aria-hidden="true"></span>
-        <div><h2 id="diagnostics-title">实时诊断监听</h2><p id="diagnostics-summary" class="muted">内存保留最近 5 小时，插件重启后清空。</p></div>
+    <header class="diagnostics-head">
+      <div class="diagnostics-heading">
+        <h2 id="diagnostics-title">实时诊断监听</h2>
+        <p id="diagnostics-summary" class="muted">内存保留最近 5 小时，插件重启后清空。</p>
+        <p class="diagnostics-guide">质量通过 = 探针答案命中所设值。返回新的 <code>780</code> 属于正常会话滚动，不能单独判定降智；只有探针通过的新票才会发布。</p>
       </div>
       <div class="actions"><button id="diagnostics-refresh" type="button" class="secondary">刷新</button><button id="diagnostics-copy" type="button" class="secondary">复制</button><button id="diagnostics-close" type="button" class="secondary">关闭</button></div>
+    </header>
+    <div id="diagnostics-scroll" class="diagnostics-scroll">
+      <section id="diagnostics-gateways-panel" class="diagnostics-gateways-panel" hidden>
+        <div class="diagnostic-section-head">
+          <strong>网关阶段统计</strong>
+          <span>同一张票会经过采集、复验和质量探针，各阶段计数不能相加为通过率。</span>
+        </div>
+        <div id="diagnostics-gateways" class="diagnostic-gateways"></div>
+      </section>
+      <section class="diagnostics-events-panel">
+        <div class="diagnostic-section-head"><strong>事件明细</strong><span>最新事件置顶；只显示脱敏后的票据指纹和网络证据。</span></div>
+        <div id="diagnostics-body" class="diagnostics-events"></div>
+        <p id="diagnostics-empty" class="empty">最近 5 小时暂无诊断事件。事件会在打票、复验和业务请求时生成。</p>
+      </section>
     </div>
-    <section id="diagnostics-gateways-panel" class="diagnostics-gateways-panel" hidden>
-      <div class="diagnostic-section-head"><strong>网关统计</strong><span>出现、通过、拒绝与模型不符</span></div>
-      <div id="diagnostics-gateways" class="diagnostic-gateways"></div>
-    </section>
-    <div class="table-wrap diagnostics-table"><table><thead><tr><th scope="col">时间</th><th scope="col">账号 / 模型</th><th scope="col">阶段</th><th scope="col">代理链</th><th scope="col">出口 IP</th><th scope="col">状态</th><th scope="col">响应</th><th scope="col">结果</th><th scope="col">耗时</th></tr></thead><tbody id="diagnostics-body"></tbody></table></div>
-    <p id="diagnostics-empty" class="empty">最近 5 小时暂无诊断事件。事件会在打票、复验和业务请求时生成。</p>
   </dialog>
 </body>
 </html>

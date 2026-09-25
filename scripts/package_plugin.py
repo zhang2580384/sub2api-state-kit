@@ -15,7 +15,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugin"
-VERSION = "4.6.0"
+VERSION = "4.6.1"
 PLUGIN_ID = "io.github.wangyunjeff.sub2api-state-kit"
 KEY_ID = "state-kit-local-v1"
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-arm64")

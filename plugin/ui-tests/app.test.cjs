@@ -244,16 +244,19 @@ test('diagnostic events expose state classes and egress evidence without credent
   assert.equal(ui.diagnosticStageLabel('capture'), '采集票据');
   assert.equal(ui.diagnosticStageLabel('quality'), '质量探针');
   assert.equal(ui.diagnosticOutcomeLabel('state_312'), '收到 312');
+  assert.equal(ui.diagnosticQualityLabel('matched'), '质量通过');
+  assert.equal(ui.diagnosticQualityLabel('failed'), '质量未通过');
   assert.deepEqual(ui.diagnosticGatewayStats([
-    { gateway: 'unified-15', outcome: 'accepted' },
-    { gateway: 'unified-15', outcome: 'model_match' },
-    { gateway: 'unified-180', outcome: 'model_mismatch' },
-    { gateway: 'unified-12', outcome: 'gateway_mismatch' },
+    { gateway: 'unified-15', stage: 'capture', outcome: 'accepted' },
+    { gateway: 'unified-15', stage: 'fixed_validation', outcome: 'model_match' },
+    { gateway: 'unified-15', stage: 'quality', outcome: 'accepted', quality: 'matched' },
+    { gateway: 'unified-180', stage: 'quality', outcome: 'quality_mismatch' },
+    { gateway: 'unified-12', stage: 'fixed_validation', outcome: 'gateway_mismatch' },
     { gateway: 'not-a-gateway', outcome: 'accepted' }
   ]), [
-    { gateway: 'unified-15', total: 2, passed: 2, rejected: 0, modelMismatch: 0, passRate: 100 },
-    { gateway: 'unified-12', total: 1, passed: 0, rejected: 1, modelMismatch: 0, passRate: 0 },
-    { gateway: 'unified-180', total: 1, passed: 0, rejected: 0, modelMismatch: 1, passRate: 0 }
+    { gateway: 'unified-15', total: 3, captureSuccess: 1, validationPassed: 1, qualityPassed: 1, qualityFailed: 0, otherFailed: 0 },
+    { gateway: 'unified-12', total: 1, captureSuccess: 0, validationPassed: 0, qualityPassed: 0, qualityFailed: 0, otherFailed: 1 },
+    { gateway: 'unified-180', total: 1, captureSuccess: 0, validationPassed: 0, qualityPassed: 0, qualityFailed: 1, otherFailed: 0 }
   ]);
 });
 
@@ -523,9 +526,10 @@ test('diagnostic panel listens while open, places newest first and retains histo
   assert.match(rendered, /采集：203\.0\.113\.18/);
   assert.match(rendered, /固定：198\.51\.100\.24/);
   assert.match(rendered, /出口不一致/);
-  assert.match(rendered, /312 · 312/);
+  assert.match(rendered, /票据状态[\s\S]*312/);
   assert.match(rendered, /gpt-5\.6-luna/);
-  assert.match(text(h.get('diagnostics-gateways')), /unified-15 · 出现 1 · 通过 1/);
+  assert.match(text(h.get('diagnostics-gateways')), /unified-15[\s\S]*采集成功 1/);
+  assert.equal(text(h.get('diagnostics-gateways')).includes('通过率'), false);
   assert.equal(rendered.includes('secret'), false);
   h.get('diagnostics-dialog').close();
   assert.equal(h.get('diagnostics-body').children.length, 2);
@@ -555,20 +559,24 @@ test('diagnostic panel opens the listener with parallel status signals and displ
   await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(h.calls.status, initialStatusCalls + 3);
   await opening;
-  const cells = h.get('diagnostics-body').children[0].children;
-  assert.match(String(cells[5].textContent), /780/);
+  function text(node) { return String(node.textContent) + node.children.map(text).join(''); }
+  assert.match(text(h.get('diagnostics-body').children[0]), /780/);
   assert.match(h.get('diagnostics-summary').textContent, /内存共 2200 条/);
   h.runtime.stop();
 });
 
-test('diagnostic window uses a fixed scrollable layout with a drag handle', () => {
+test('diagnostic window uses a full-screen single-scroll event layout', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'assets', 'diagnostics.css'), 'utf8');
   assert.match(html, /id="gateway-policy"/);
-  assert.match(html, /id="diagnostics-drag-handle"/);
+  assert.match(html, /id="diagnostics-scroll"/);
   assert.match(html, /最近 5 小时/);
-  assert.match(css, /height:\s*min\(900px/);
-  assert.match(css, /\.diagnostic-dialog\[open\][\s\S]*display:\s*flex/);
-  assert.match(css, /\.diagnostics-table[\s\S]*overflow:\s*auto/);
-  assert.match(css, /\.diagnostics-gateways-panel[\s\S]*overflow:\s*auto/);
+  assert.match(html, /各阶段计数不能相加/);
+  assert.match(html, /返回新的 <code>780<\/code>/);
+  assert.doesNotMatch(html, /diagnostics-drag-handle/);
+  assert.match(css, /\.diagnostics-dialog[\s\S]*width:\s*100vw/);
+  assert.match(css, /\.diagnostics-dialog\[open\][\s\S]*display:\s*flex/);
+  assert.match(css, /\.diagnostics-scroll[\s\S]*overflow-y:\s*auto/);
+  assert.match(css, /\.diagnostics-events[\s\S]*display:\s*grid/);
+  assert.doesNotMatch(css, /\.diagnostics-table/);
 });
