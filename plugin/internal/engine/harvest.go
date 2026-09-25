@@ -117,6 +117,14 @@ func (e *Engine) schedule() {
 					delete(e.standbyTickets, k)
 				}
 			} else {
+				if t.QualityStatus == ticketQualityProvisional {
+					if standby := e.standbyTickets[k]; validTicket(standby, e.config, a, model, now) && standby.QualityStatus == ticketQualityVerified {
+						e.tickets[k] = standby
+						delete(e.standbyTickets, k)
+						delete(e.revoked, k)
+						continue
+					}
+				}
 				lead := effectiveRefreshBeforeForState(e.config, a, t.State)
 				standbyEnabled := e.config.StandbyTicketEnabled
 				if standbyEnabled {
@@ -129,13 +137,18 @@ func (e *Engine) schedule() {
 						continue
 					}
 				}
-				if t.ExpiresAt.Sub(now) > lead {
+				forceStrictUpgrade := configuredQualityProbeMode(e.config) == qualityProbeStrictFallback &&
+					t.QualityStatus == ticketQualityProvisional
+				if forceStrictUpgrade && r != nil && r.QualityRetryAfter.After(now) {
+					continue
+				}
+				if !forceStrictUpgrade && t.ExpiresAt.Sub(now) > lead {
 					continue
 				}
 			}
 			standby := e.config.StandbyTicketEnabled && validTicket(t, e.config, a, model, now)
-			if !validTicket(t, e.config, a, model, now) {
-				standby = false
+			if validTicket(t, e.config, a, model, now) && t.QualityStatus == ticketQualityProvisional {
+				standby = true
 			}
 			c := e.config
 			gen := e.generation
@@ -162,8 +175,16 @@ func (e *Engine) note(k string, gen uint64, attempt int, reason string) {
 		r = &jobRecord{}
 		e.records[k] = r
 	}
-	r.Attempts = attempt
+	if attempt > r.Attempts {
+		r.Attempts = attempt
+	}
 	r.LastError = reason
+}
+
+func (e *Engine) hasValidTicket(k string, c Config, a AccountConfig, model string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return validTicket(e.tickets[k], c, a, model, time.Now())
 }
 func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c Config, a AccountConfig, model, k string, gen uint64, standby bool) {
 	defer e.wg.Done()
@@ -181,9 +202,18 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			r = &jobRecord{}
 			e.records[k] = r
 		}
-		if success {
+		current := e.tickets[k]
+		provisionalAlive := !success && ctx.Err() == nil &&
+			validTicket(current, c, a, model, time.Now()) &&
+			current.QualityStatus == ticketQualityProvisional
+		if success || provisionalAlive {
 			r.CooldownUntil = time.Time{}
-			r.LastError = ""
+			r.LastError = reason
+			if provisionalAlive || reason == "quality_provisional_published" {
+				r.QualityRetryAfter = time.Now().Add(time.Duration(c.AttemptIntervalSeconds) * time.Second)
+			} else {
+				r.QualityRetryAfter = time.Time{}
+			}
 		} else if ctx.Err() == nil {
 			r.LastError = reason
 			r.CooldownUntil = time.Now().Add(time.Duration(c.CooldownSeconds) * time.Second)
@@ -229,157 +259,37 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		// consume one of the configured generator acquisition attempts.
 		attemptLimit++
 	}
-	reusePrevious := preferPrevious
-	for attempt := 1; attempt <= attemptLimit; attempt++ {
+	captures, cancelCaptures := e.captureCandidates(ctx, host, c, a, model, k, gen, attemptLimit, preferPrevious, reuseCurrentEgress)
+	defer cancelCaptures()
+	provisionalPublished := false
+	for capture := range captures {
 		if ctx.Err() != nil {
 			return
 		}
-		e.note(k, gen, attempt, "")
-		attemptStarted := time.Now()
-		if attempt > 1 {
-			delay := time.Duration(c.AttemptIntervalSeconds) * time.Second
-			if fastRetryReason(reason) && delay > time.Second {
-				delay = time.Second
-			}
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return
-			}
+		attempt := capture.Attempt
+		identity = capture.Identity
+		targetProxyURL := capture.TargetProxyURL
+		upstreamProxyURL := capture.UpstreamProxyURL
+		generatorMode := capture.GeneratorMode
+		captureEgress := capture.CaptureEgress
+		captureCountry := capture.CaptureCountry
+		captured := capture.CapturedAt
+		sessionID := capture.SessionID
+		cookies := capture.Cookies
+		candidate := capture.Candidate
+		status := capture.Status
+		if capture.Reason != "" {
+			reason = capture.Reason
 		}
-		identity, err = resolveIdentity(ctx, host, a.AccountID)
-		if err != nil {
-			reason = "identity_unavailable"
-			return
-		}
-		targetProxyURL := ""
-		upstreamProxyURL := c.UpstreamProxyURL
-		if reuseCurrentEgress {
-			e.mu.Lock()
-			current := e.tickets[k]
-			e.mu.Unlock()
-			if validTicket(current, c, a, model, time.Now()) {
-				targetProxyURL = current.GeneratedProxyURL
-			}
-			// Reuse one working egress to avoid an unnecessary generator call.
-			// If it cannot produce another ticket, the next attempt must obtain
-			// a fresh egress instead of retrying the same bad endpoint.
-			reuseCurrentEgress = false
-			reusePrevious = false
-		}
-		if cookieMode {
-			if c.CookieCaptureMode == captureModeSOCKS5 {
-				targetProxyURL = c.CookieCaptureProxyURL
-			} else {
-				if reusePrevious {
-					reusePrevious = false
-					targetProxyURL = e.preferredPreviousProxy(ctx, host, a.AccountID, k)
-				}
-				if targetProxyURL == "" {
-					targetProxyURL, err = e.generateProxy(ctx, c)
-					if err != nil {
-						reason = "generator_unavailable"
-						e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason,
-							DurationMS: time.Since(attemptStarted).Milliseconds()})
-						continue
-					}
-				}
-			}
-		} else {
-			switch a.EgressMode {
-			case egressModePlugin:
-				targetProxyURL = a.StickyProxyURL
-			case egressModeGenerator:
-				if reusePrevious {
-					reusePrevious = false
-					targetProxyURL = e.preferredPreviousProxy(ctx, host, a.AccountID, k)
-				}
-				if targetProxyURL == "" {
-					targetProxyURL, err = e.generateProxy(ctx, c)
-					if err != nil {
-						reason = "generator_unavailable"
-						e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-							UpstreamProxy: upstreamProxyURL, Outcome: "generator_failed", Error: reason,
-							DurationMS: time.Since(attemptStarted).Milliseconds()})
-						continue
-					}
-				}
-			default:
-				targetProxyURL, err = rotateProxy(c.DynamicProxyURL)
-				if err != nil {
-					reason = "invalid_dynamic_proxy"
-					return
-				}
-			}
-		}
-		generatorMode := generatorCapture
-		captureEgress := ""
-		captureCountry := ""
-		if cookieMode || generatorMode {
-			info := e.lookupEgressInfo(ctx, targetProxyURL, upstreamProxyURL)
-			captureEgress = info.IP
-			captureCountry = info.Country
-			if captureEgress == "" {
-				reason = "generator_egress_unavailable"
-				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-					UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, Outcome: "egress_unavailable", Error: reason})
-				continue
-			}
-			if countryBlocked(captureCountry, c.ProxyGeneratorBlockedCountries) {
-				reason = "generator_region_blocked"
-				e.recordDiagnostic(diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-					UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, CaptureEgress: captureEgress, Outcome: "region_blocked", Error: reason})
-				continue
-			}
-		}
-		captured := time.Now()
-		sessionID := randomID()
-		cookies := map[string]string{}
-		if c.RouteCookieReuse {
-			cookies = e.preferredRouteCookies(a.AccountID, c.GatewayPolicy, c.TargetGateway)
-		}
-		captureResult, err := e.probe(ctx, identity, model, targetProxyURL, upstreamProxyURL, "", sessionID, cookies, c.MintFingerprintConvergence)
-		candidate, status, captureModel := captureResult.State, captureResult.Status, captureResult.Model
-		cookies = captureResult.Cookies
-		if c.RouteCookieReuse {
-			e.rememberRouteCookies(a.AccountID, cookies, c.GatewayPolicy, c.TargetGateway)
-		}
-		if !generatorMode && !cookieMode {
-			captureEgress = e.lookupEgressIP(ctx, targetProxyURL, upstreamProxyURL)
-		}
-		captureEvent := diagnosticEvent{AccountID: a.AccountID, Model: model, Stage: "capture", Attempt: attempt,
-			UpstreamProxy: upstreamProxyURL, TargetProxy: targetProxyURL, CaptureEgress: captureEgress,
-			StateLength: len(candidate), StateClass: stateDiagnosticClass(candidate), StateFingerprint: stateFingerprint(candidate),
-			TicketAgeSeconds: stateAgeSeconds(candidate, time.Now()), Gateway: gatewayFromCookies(cookies),
-			CookieFingerprint: cookieFingerprint(cookies), ResponseModel: captureModel,
-			HTTPStatus: status, DurationMS: time.Since(attemptStarted).Milliseconds()}
-		if err != nil {
-			reason = "harvest_failed"
-			captureEvent.Outcome = "probe_failed"
-			captureEvent.Error = err.Error()
-			e.recordDiagnostic(captureEvent)
+		if capture.Err != nil {
 			if isStopStatus(status) {
 				reason = stopReason(status)
-				return
 			}
 			continue
 		}
-		if !validPlanState(candidate, a.Plan, c.AllowState780) {
-			reason = "unexpected_state_length"
-			captureEvent.Outcome = "unexpected_state"
-			e.recordDiagnostic(captureEvent)
+		if capture.Reason != "" {
 			continue
 		}
-		if _, gatewayReason := routeGatewayAcceptance(candidate, cookies, c.GatewayPolicy, c.TargetGateway); gatewayReason != "" {
-			reason = gatewayReason
-			captureEvent.Outcome = gatewayReason
-			captureEvent.Error = gatewayReason
-			e.recordDiagnostic(captureEvent)
-			continue
-		}
-		captureEvent.Outcome = "accepted"
-		e.recordDiagnostic(captureEvent)
 		// Resolve fresh credentials again and validate through the same account
 		// egress that will serve business traffic. Proxy credentials are never
 		// copied into the ticket.
@@ -475,7 +385,6 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 			e.recordDiagnostic(validationEvent)
 			if isStopStatus(status) {
 				reason = stopReason(status)
-				return
 			}
 			continue
 		}
@@ -510,7 +419,8 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		}
 		validationEvent.Outcome = "accepted"
 		e.recordDiagnostic(validationEvent)
-		if c.QualityProbeEnabled {
+		qualityMode := configuredQualityProbeMode(c)
+		if qualityMode != qualityProbeOff {
 			qualityStarted := time.Now()
 			qualityResult, qualityErr := e.probeWithPrompt(
 				ctx,
@@ -554,14 +464,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 				e.recordDiagnostic(qualityEvent)
 				if isStopStatus(qualityStatus) {
 					reason = stopReason(qualityStatus)
-					return
 				}
-				continue
-			}
-			if !qualityAnswerMatches(qualityResult.OutputText, c.QualityProbeAccept) {
-				reason = "quality_mismatch"
-				qualityEvent.Outcome = "quality_mismatch"
-				e.recordDiagnostic(qualityEvent)
 				continue
 			}
 			if validState(qualityState, 312) {
@@ -603,6 +506,33 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 				e.recordDiagnostic(qualityEvent)
 				continue
 			}
+			qualityMatched := qualityAnswerMatches(qualityResult.OutputText, c.QualityProbeAccept)
+			if !qualityMatched {
+				reason = "quality_mismatch"
+				qualityEvent.Outcome = "quality_mismatch"
+				if qualityMode == qualityProbeStrictFallback && !standby && !e.hasValidTicket(k, c, a, model) {
+					issuedAt := ticketIssuedAt(validatedState, captured)
+					expiresAt := issuedAt.Add(effectiveTicketTTLForState(c, a, validatedState))
+					if expiresAt.After(time.Now()) {
+						t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: validatedState, Version: randomID(),
+							ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), GeneratedProxyURL: "",
+							GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured, IssuedAt: issuedAt,
+							ExpiresAt: expiresAt, TicketMode: c.TicketMode, QualityStatus: ticketQualityProvisional, SessionBound: sessionBound,
+							Gateway: gatewayFromCookies(cookies), CaptureProxyURL: targetProxyURL, CaptureEgressIP: captureEgress,
+							BusinessEgressIP: fixedEgress, Cookies: cookies, SessionID: sessionID}
+						if e.commit(ctx, host, c, a, model, k, gen, t, true, false) {
+							provisionalPublished = true
+							reason = "quality_provisional_published"
+							qualityEvent.Quality = "provisional"
+							qualityEvent.Outcome = "provisional_accepted"
+							e.recordDiagnostic(qualityEvent)
+							continue
+						}
+					}
+				}
+				e.recordDiagnostic(qualityEvent)
+				continue
+			}
 			qualityEvent.Quality = "matched"
 			qualityEvent.Outcome = "accepted"
 			e.recordDiagnostic(qualityEvent)
@@ -625,7 +555,7 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 		t := &ticket{AccountID: a.AccountID, Model: model, Plan: a.Plan, State: validatedState, Version: randomID(),
 			ConfigFingerprint: fp, FixedFingerprint: proxyFingerprint(fixedProxyURL), GeneratedProxyURL: generatedProxyURL,
 			GeneratedEgressIP: captureEgress, IdentityFingerprint: stableIdentity(fixed), CapturedAt: captured, IssuedAt: issuedAt,
-			ExpiresAt: expiresAt, TicketMode: c.TicketMode, SessionBound: sessionBound,
+			ExpiresAt: expiresAt, TicketMode: c.TicketMode, QualityStatus: ticketQualityVerified, SessionBound: sessionBound,
 			Gateway:         gateway,
 			CaptureProxyURL: targetProxyURL, CaptureEgressIP: captureEgress, BusinessEgressIP: fixedEgress,
 			Cookies: cookies, SessionID: sessionID}
@@ -635,10 +565,15 @@ func (e *Engine) collect(ctx context.Context, host pluginv1.HostServiceClient, c
 				e.rememberPreviousEgress(ctx, host, a.AccountID, targetProxyURL, captureEgress)
 			}
 			success = true
+			reason = ""
 			return
 		}
 		reason = "ticket_persistence_failed"
 		return
+	}
+	if provisionalPublished {
+		success = true
+		reason = "quality_provisional_published"
 	}
 }
 func isStopStatus(status int) bool { return status == 401 || status == 403 || status == 429 }
@@ -832,7 +767,10 @@ func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c 
 	}
 	e.mu.Lock()
 	ok := valid()
-	targetStandby := standby && validTicket(e.tickets[k], c, a, model, time.Now())
+	current := e.tickets[k]
+	upgradeProvisional := standby && t.QualityStatus == ticketQualityVerified && current != nil &&
+		current.QualityStatus == ticketQualityProvisional && validTicket(current, c, a, model, time.Now())
+	targetStandby := standby && !upgradeProvisional && validTicket(current, c, a, model, time.Now())
 	e.mu.Unlock()
 	if !ok {
 		return false
@@ -854,7 +792,7 @@ func (e *Engine) commit(ctx context.Context, host pluginv1.HostServiceClient, c 
 	if !valid() {
 		return false
 	}
-	if standby && validTicket(e.tickets[k], c, a, model, time.Now()) {
+	if standby && !upgradeProvisional && validTicket(e.tickets[k], c, a, model, time.Now()) {
 		e.standbyTickets[k] = t
 	} else {
 		e.tickets[k] = t

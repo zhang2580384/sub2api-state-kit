@@ -13,7 +13,7 @@
 <body>
   <main class="shell">
     <header class="page-head">
-      <div><p class="eyebrow">Sub2API 插件</p><h1>STATE Kit 账号管理</h1><p class="muted">每个账号可选择沿用 Sub2 原有代理、账号粘性代理或插件内置代理生成器接管出口。</p></div>
+      <div><p class="eyebrow">Sub2API 插件</p><h1>STATE Kit 账号管理</h1><p class="muted">统一使用第一层代理访问代理生成器，并为每个账号获取、校验和滚动保存 780 票据。</p></div>
       <span id="connection-status" class="badge">正在连接宿主</span>
     </header>
 
@@ -23,32 +23,30 @@
       <fieldset id="config-fields" disabled>
         <section class="card">
           <div class="section-heading">
-            <div><h2>启用与运行方式</h2><p class="muted">总开关和账号开关均开启时，该账号才会获取、使用票据。</p></div>
+            <div><h2>启用与票据模式</h2><p class="muted">总开关和账号开关均开启时，该账号才会获取、使用票据。</p></div>
             <label class="switch-label"><input id="enabled" type="checkbox" role="switch"><span>启用 STATE Kit</span></label>
           </div>
-          <label for="ticket-mode">运行方式</label>
-          <select id="ticket-mode">
-            <option value="legacy">稳定同出口（推荐）：打票和用票保持同一粘性 IP</option>
-            <option value="cookie">Cookie 分流：打票和业务可以使用不同出口</option>
-          </select>
-          <p id="ticket-mode-help" class="help">固定出口适合已验证的粘性 IP；Cookie 分流允许业务使用另一个出口。</p>
-          <div class="inline-switch"><label class="switch-label" for="allow-state-780"><input id="allow-state-780" type="checkbox" role="switch"><span>兼容新版 780 状态（实验）</span></label></div>
-          <p class="help">仅在无法取得 292/332 时开启。780 必须携带会话 Cookie 并命中目标网关，之后持续滚动保存；返回 312、模型不一致或请求失败时仍会丢弃。</p>
+          <p class="help">当前只使用 Cookie + 780 的滚动票据方式。旧 292/332 模式已移除，旧配置会在保存时自动迁移；香港和未知出口始终拒绝。</p>
           <div class="inline-switch"><label class="switch-label" for="route-cookie-reuse"><input id="route-cookie-reuse" type="checkbox" role="switch"><span>复用上一轮网关 Cookie 打票</span></label></div>
           <p class="help">复用 <code>__cflb/__oailb</code> 定向重打，减少落到错误网关的概率；网关 Cookie 过期或不可解析时自动回到裸打。</p>
           <div class="inline-switch"><label class="switch-label" for="mint-fingerprint-convergence"><input id="mint-fingerprint-convergence" type="checkbox" role="switch"><span>打票指纹收敛为 codex-tui</span></label></div>
           <p class="help">统一打票请求的客户端标识、推理参数和负载，减少同一账号被分配到不同模型指纹的概率。</p>
-          <div class="inline-switch"><label class="switch-label" for="quality-probe-enabled"><input id="quality-probe-enabled" type="checkbox" role="switch"><span>发布新票前启用质量探针（可消耗额度）</span></label></div>
+          <label for="quality-probe-mode">质量探针模式</label>
+          <select id="quality-probe-mode">
+            <option value="strict_fallback">严格优先 + 临时票保活（推荐）</option>
+            <option value="strict">严格：只发布回答命中的票</option>
+            <option value="off">关闭质量探针</option>
+          </select>
           <div id="quality-probe-fields" hidden>
             <label for="quality-probe-prompt">质量探针提示词</label>
             <textarea id="quality-probe-prompt" rows="2" maxlength="1000" autocomplete="off" spellcheck="false" placeholder="例如：不要联网，不要猜测，说出你知道的最新苹果手机"></textarea>
             <label for="quality-probe-accept">通过答案（逗号分隔，最多 8 个）</label>
             <input id="quality-probe-accept" type="text" maxlength="512" autocomplete="off" spellcheck="false" placeholder="例如：17">
-            <p class="help">只用于发布新票前验收：新票通过同出口复验后会再请求一次，答案包含任一通过值才发布；未命中时旧票继续服务并重新打票。返回新的 <code>780</code> 只是会话滚动，不等于降智，也不能替代探针验收。提示词会随请求发送给上游，请勿填写敏感信息。</p>
+            <p class="help">严格模式只发布答案命中的票；严格优先模式在没有旧票时会先发布一张“可用 · 未通过质量”的临时票保活，同时继续寻找严格合格票。提示词会随请求发送给上游，请勿填写敏感信息。</p>
           </div>
           <label for="upstream-proxy-url">第一层：S5/HTTP 代理地址（两种方式共用）</label>
           <div class="input-action"><input id="upstream-proxy-url" type="password" autocomplete="new-password" spellcheck="false" placeholder="socks5h://user:pass@proxy.example:1080"><button id="toggle-upstream-proxy" type="button" class="secondary" aria-controls="upstream-proxy-url" aria-pressed="false">显示</button></div>
-          <p id="upstream-proxy-help" class="help">直接粘贴完整地址，用于访问代理生成器；Cookie 分流的业务代理留空时，也作为业务出口。官方 0.2.8 插件页不提供 IP 管理代理列表。</p>
+          <p id="upstream-proxy-help" class="help">直接粘贴完整地址，用于访问代理生成器；业务代理留空时，也作为业务出口。官方 0.2.8 插件页不提供 IP 管理代理列表。</p>
           <div class="inline-switch"><label class="switch-label" for="request-rewrite-enabled"><input id="request-rewrite-enabled" type="checkbox" role="switch"><span>统一请求环境日期、时区与语言</span></label></div>
           <label for="default-request-timezone">默认请求时区</label>
           <input id="default-request-timezone" type="text" list="timezone-options" autocomplete="off" spellcheck="false" placeholder="Asia/Singapore">
@@ -57,13 +55,8 @@
             <option value="America/Los_Angeles"></option><option value="America/New_York"></option><option value="Europe/London"></option>
           </datalist>
           <p class="help">仅替换请求里已经存在的日期、时区、<code>user_location.timezone</code> 和 <code>Accept-Language</code>；账号级时区留空时使用此默认值。香港、澳门、台湾和中国大陆时区不可用。</p>
-          <div id="legacy-mode-fields">
-            <label for="dynamic-proxy-url">第二层：Sub2 原有动态代理</label>
-            <div class="input-action"><input id="dynamic-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="填写动态代理地址"><button id="toggle-proxy" type="button" class="secondary" aria-controls="dynamic-proxy-url" aria-pressed="false">显示</button></div>
-            <p class="help">仅账号出口方式选“Sub2 原有代理”时使用。支持 <code>{random}</code> 或 <code>{sid}</code>。</p>
-          </div>
-          <div id="cookie-mode-fields" hidden>
-            <label for="cookie-capture-mode">Cookie 打票方式</label>
+          <div id="cookie-mode-fields">
+            <label for="cookie-capture-mode">打票出口方式</label>
             <select id="cookie-capture-mode">
             <option value="generator">代理生成器 API：每次获取一个可复用的粘性出口</option>
             <option value="socks5">S5/HTTP 固定采集代理：直接使用下面的采集代理打票</option>
@@ -74,21 +67,21 @@
               <input id="cookie-capture-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="socks5h://user:pass@capture.example:1080">
               <p class="help">支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。</p>
             </div>
-            <label for="cookie-business-proxy-url">Cookie 模式业务固定代理</label>
+            <label for="cookie-business-proxy-url">业务固定代理</label>
             <input id="cookie-business-proxy-url" type="password" autocomplete="off" spellcheck="false" placeholder="留空则使用第一层代理">
             <p class="help">留空使用第一层；可与打票出口不同。</p>
           </div>
           <div id="generator-fields">
             <label for="proxy-generator-url">代理生成器 API</label>
             <input id="proxy-generator-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://example.com/gen?zone=custom&sessType=sticky">
-            <p class="help">固定出口下同时用于打票和业务；B2Proxy 固定 180 分钟时保留 <code>sessTime=180&amp;sessAuto=0</code>。</p>
+            <p class="help">只要打票方式选择“代理生成器 API”就使用这里。B2Proxy 固定 180 分钟时保留 <code>sessTime=180&amp;sessAuto=0</code>。</p>
           </div>
           <label for="proxy-generator-blocked-countries">禁止出口国家或地区</label>
           <input id="proxy-generator-blocked-countries" type="text" autocomplete="off" spellcheck="false" placeholder="HK, CN, RU">
           <p class="help">ISO 两位代码，逗号分隔。香港 <code>HK</code> 和未知地区始终拒绝。</p>
-          <div id="prefer-previous-fields">
+          <div id="prefer-previous-fields" hidden>
             <div class="inline-switch"><label class="switch-label" for="prefer-previous-ip"><input id="prefer-previous-ip" type="checkbox" role="switch"><span>优先复用上一张票的出口</span></label></div>
-            <p class="help">失败后自动获取新出口。</p>
+            <p class="help">并发打票时先复用上一轮出口，再启动其他新出口；失败后自动换出口。</p>
           </div>
           <div class="inline-switch"><label class="switch-label" for="standby-ticket-enabled"><input id="standby-ticket-enabled" type="checkbox" role="switch"><span>提前准备备用票</span></label></div>
           <p class="help">新票验证完成前不替换当前票；当前票失效或收到 312 后自动顶替。</p>
@@ -102,29 +95,27 @@
             <button id="add-account" type="button" class="secondary">添加账号</button>
           </div>
           <p id="account-discovery" class="help">已发现账号下拉只同步账号 ID；名称、邮箱、到期时间和额度请在添加后填写。</p>
-          <div class="table-wrap"><table class="accounts-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号资料</th><th scope="col">开关</th><th scope="col">出口方式</th><th scope="col">账号粘性代理</th><th scope="col">套餐 / 票据</th><th scope="col">模型</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="accounts-body"></tbody></table></div>
-          <p id="accounts-empty" class="empty">尚未添加账号。添加后选择出口模式、套餐和模型，再手动开启。</p>
-          <p class="help">Sub2 原有代理保持宿主行为；账号粘性代理模式使用你填写的固定 session；代理生成器模式由插件调用 API 取得固定 <code>host:port</code>。粘性代理不接受 <code>{random}</code> 或 <code>{sid}</code>；从聊天复制的 <code>\@</code> 请改成普通 <code>@</code>。</p>
-          <p class="help">Pro 对应 292，Team 对应 332。模型框可从常用模型中选择，也可直接输入自定义名称；多个模型用英文逗号分隔。</p>
+          <div class="table-wrap"><table class="accounts-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号资料</th><th scope="col">开关</th><th scope="col">套餐</th><th scope="col">模型</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="accounts-body"></tbody></table></div>
+          <p id="accounts-empty" class="empty">尚未添加账号。添加后选择套餐和模型，再手动开启。</p>
+          <p class="help">账号资料只用于配置页识别，不会替代宿主凭据。从聊天复制的 <code>\@</code> 请改成普通 <code>@</code>。</p>
+          <p class="help">Pro 和 Team 都使用 Cookie + 780 票据，套餐字段仅保留账号类型语义。模型框可从常用模型中选择，也可直接输入自定义名称；多个模型用英文逗号分隔。</p>
           <datalist id="model-options"><option value="gpt-6-astra"></option><option value="gpt-5.6-sol"></option><option value="gpt-5.6-terra"></option><option value="gpt-5.6-luna"></option><option value="gpt-5.5"></option></datalist>
         </section>
 
         <details class="card advanced">
           <summary>高级参数 <span class="muted">通常保持默认即可</span></summary>
           <div class="field-grid">
-            <div><label for="ttl-minutes">旧模式票据有效期（分钟）</label><input id="ttl-minutes" type="number" min="1" max="180" value="180" required></div>
-            <div><label for="refresh-before-seconds">旧模式提前续期（秒）</label><input id="refresh-before-seconds" type="number" min="0" max="3599" value="120" required></div>
             <div><label for="proxy-generator-ttl-minutes">生成器出口有效期（分钟）</label><input id="proxy-generator-ttl-minutes" type="number" min="1" max="180" value="180" required></div>
-            <div><label for="cookie-ticket-ttl-seconds">Cookie 票据持续期（秒）</label><input id="cookie-ticket-ttl-seconds" type="number" min="30" max="1800" value="300" required></div>
-            <div><label for="state-780-ttl-seconds">780 票据持续期（秒）</label><input id="state-780-ttl-seconds" type="number" min="30" max="1800" value="240" required></div>
+            <div><label for="cookie-ticket-ttl-seconds">票据持续期（秒）</label><input id="cookie-ticket-ttl-seconds" type="number" min="30" max="1800" value="240" required></div>
             <div><label for="gateway-policy">网关策略</label><select id="gateway-policy"><option value="allow">allow · 只允许列表内网关</option><option value="deny">deny · 只拒绝列表内网关</option><option value="any">any · 不限制网关</option></select></div>
             <div><label for="target-gateway">网关列表（allow / deny）</label><input id="target-gateway" type="text" maxlength="256" value="unified-15,unified-88,unified-180" placeholder="15,88,180"></div>
             <div><label for="standby-lead-seconds">备用票提前时间（秒）</label><input id="standby-lead-seconds" type="number" min="10" max="600" value="90" required></div>
             <div><label for="max-attempts">每轮最多尝试</label><input id="max-attempts" type="number" min="1" max="32" value="8" required></div>
+            <div><label for="mint-concurrency">并发打票数</label><select id="mint-concurrency"><option value="1">1 · 串行</option><option value="2">2 · 并发</option><option value="3" selected>3 · 并发</option></select></div>
             <div><label for="attempt-interval-seconds">常规重试间隔（秒）</label><input id="attempt-interval-seconds" type="number" min="1" max="300" value="10" required></div>
             <div><label for="cooldown-seconds">失败后冷却（秒）</label><input id="cooldown-seconds" type="number" min="30" max="3600" value="300" required></div>
           </div>
-          <p class="help"><code>allow</code> 只允许列表内网关；<code>deny</code> 只拒绝列表内网关，其余继续复验；<code>any</code> 不限制网关且忽略列表。列表支持网关号或 <code>unified-N</code>。三种策略都要求完整的 <code>__cflb/__oailb</code> 路由对，缺少任一 Cookie 都会重打。生成出口被地区过滤时会立即换出口，不等待常规重试间隔。新票通过业务出口复验并保存成功后才进入可用状态；续期期间旧票继续服务。</p>
+          <p class="help"><code>allow</code> 只允许列表内网关；<code>deny</code> 只拒绝列表内网关，其余继续复验；<code>any</code> 不限制网关且忽略列表。列表支持网关号或 <code>unified-N</code>。三种策略都要求完整的 <code>__cflb/__oailb</code> 路由对。并发打票共享“每轮最多尝试”总预算，严格合格票完成后会取消其他请求；续期期间旧票继续服务。</p>
         </details>
       </fieldset>
 
@@ -134,7 +125,7 @@
 
     <section class="card status-card" aria-labelledby="tickets-title">
       <div class="section-heading"><div><h2 id="tickets-title">运行状态</h2><p id="status-summary" class="muted">正在读取状态…</p></div><div class="actions"><button id="open-diagnostics" type="button" class="secondary" disabled>查看诊断日志</button><button id="refresh-status" type="button" class="secondary" disabled>刷新状态</button></div></div>
-      <div class="table-wrap"><table><thead><tr><th scope="col">账号 / 模型</th><th scope="col">套餐</th><th scope="col">状态</th><th scope="col">剩余时间</th><th scope="col">最近情况</th></tr></thead><tbody id="tickets-body"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th scope="col">账号 / 模型</th><th scope="col">套餐 / 票据</th><th scope="col">质量</th><th scope="col">状态</th><th scope="col">剩余时间</th><th scope="col">最近情况</th></tr></thead><tbody id="tickets-body"></tbody></table></div>
       <p id="tickets-empty" class="empty">暂无票据状态。</p>
       <p class="help">每 10 秒只读刷新，不显示票据原文。配置表单中的未保存修改会保留。</p>
     </section>
@@ -144,7 +135,7 @@
       <div class="diagnostics-heading">
         <h2 id="diagnostics-title">实时诊断监听</h2>
         <p id="diagnostics-summary" class="muted">内存保留最近 5 小时，插件重启后清空。</p>
-        <p class="diagnostics-guide">质量通过 = 探针答案命中所设值。返回新的 <code>780</code> 属于正常会话滚动，不能单独判定降智；只有探针通过的新票才会发布。</p>
+        <p class="diagnostics-guide">质量通过 = 探针答案命中所设值。返回新的 <code>780</code> 属于正常会话滚动，不能单独判定降智；严格优先模式无旧票时会先发布明确标注的临时票，并继续尝试升级为严格合格票。</p>
       </div>
       <div class="actions"><button id="diagnostics-refresh" type="button" class="secondary">刷新</button><button id="diagnostics-copy" type="button" class="secondary">复制</button><button id="diagnostics-close" type="button" class="secondary">关闭</button></div>
     </header>

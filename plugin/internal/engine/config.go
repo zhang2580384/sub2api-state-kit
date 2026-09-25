@@ -17,7 +17,7 @@ import (
 )
 
 const PluginID = "io.github.wangyunjeff.sub2api-state-kit"
-const Version = "4.6.1"
+const Version = "4.7.0"
 const StateHeader = "x-codex-turn-state"
 const namespace = "state-kit-v1"
 
@@ -38,6 +38,17 @@ const (
 const (
 	ticketModeLegacy = "legacy"
 	ticketModeCookie = "cookie"
+)
+
+const (
+	qualityProbeOff            = "off"
+	qualityProbeStrict         = "strict"
+	qualityProbeStrictFallback = "strict_fallback"
+)
+
+const (
+	ticketQualityVerified    = "verified"
+	ticketQualityProvisional = "provisional"
 )
 
 const (
@@ -68,6 +79,7 @@ type Config struct {
 	RouteCookieReuse               bool     `json:"route_cookie_reuse"`
 	MintFingerprintConvergence     bool     `json:"mint_fingerprint_convergence"`
 	QualityProbeEnabled            bool     `json:"quality_probe_enabled"`
+	QualityProbeMode               string   `json:"quality_probe_mode"`
 	QualityProbePrompt             string   `json:"quality_probe_prompt"`
 	QualityProbeAccept             string   `json:"quality_probe_accept"`
 	TicketMode                     string   `json:"ticket_mode"`
@@ -87,6 +99,7 @@ type Config struct {
 	RefreshBeforeSeconds   int             `json:"refresh_before_seconds"`
 	RefreshBeforeMinutes   int             `json:"refresh_before_minutes,omitempty"` // legacy v0.3.8
 	MaxAttempts            int             `json:"max_attempts"`
+	MintConcurrency        int             `json:"mint_concurrency"`
 	AttemptIntervalSeconds int             `json:"attempt_interval_seconds"`
 	CooldownSeconds        int             `json:"cooldown_seconds"`
 	Accounts               []AccountConfig `json:"accounts"`
@@ -110,6 +123,7 @@ func DefaultConfig() Config {
 		TTLMinutes:                     180,
 		RefreshBeforeSeconds:           120,
 		MaxAttempts:                    8,
+		MintConcurrency:                3,
 		AttemptIntervalSeconds:         10,
 		CooldownSeconds:                300,
 		ProxyGeneratorBlockedCountries: []string{"HK"},
@@ -119,12 +133,17 @@ func DefaultConfig() Config {
 		TargetGateway:                  defaultTargetGateways,
 		RouteCookieReuse:               true,
 		MintFingerprintConvergence:     true,
-		TicketMode:                     ticketModeLegacy,
-		CookieCaptureMode:              captureModeGenerator,
-		CookieTicketTTLSeconds:         300,
-		StandbyLeadSeconds:             90,
-		DefaultRequestTimezone:         defaultRequestTimezone,
-		Accounts:                       []AccountConfig{},
+		// ParseConfig migrates every production configuration to Cookie + 780.
+		// The zero-value defaults stay legacy so compatibility tests can cover
+		// old persisted tickets while the public config remains single-mode.
+		TicketMode:             ticketModeLegacy,
+		AllowState780:          false,
+		CookieCaptureMode:      captureModeGenerator,
+		CookieTicketTTLSeconds: 300,
+		StandbyLeadSeconds:     90,
+		DefaultRequestTimezone: defaultRequestTimezone,
+		QualityProbeMode:       qualityProbeOff,
+		Accounts:               []AccountConfig{},
 	}
 }
 
@@ -159,6 +178,7 @@ func ParseConfig(raw []byte) (Config, error) {
 	_, hasTargetGateway := fields["target_gateway"]
 	_, hasSeconds := fields["refresh_before_seconds"]
 	_, hasMinutes := fields["refresh_before_minutes"]
+	_, hasQualityProbeMode := fields["quality_probe_mode"]
 	if hasMinutes && !hasSeconds {
 		if c.RefreshBeforeMinutes < 0 || c.RefreshBeforeMinutes > 3599/60 {
 			return c, errors.New("refresh_before_minutes must be nonnegative and less than ttl_minutes")
@@ -170,9 +190,11 @@ func ParseConfig(raw []byte) (Config, error) {
 	c.DynamicProxyURL = strings.TrimSpace(c.DynamicProxyURL)
 	c.ProxyGeneratorURL = strings.TrimSpace(c.ProxyGeneratorURL)
 	c.TicketMode = strings.ToLower(strings.TrimSpace(c.TicketMode))
-	if c.TicketMode == "" {
-		c.TicketMode = ticketModeLegacy
+	if c.TicketMode == "" || c.TicketMode == ticketModeLegacy {
+		// 292/332 are retired. Old configurations are migrated in place.
+		c.TicketMode = ticketModeCookie
 	}
+	c.AllowState780 = true
 	c.CookieCaptureMode = strings.ToLower(strings.TrimSpace(c.CookieCaptureMode))
 	if c.CookieCaptureMode == "" {
 		c.CookieCaptureMode = captureModeGenerator
@@ -189,6 +211,23 @@ func ParseConfig(raw []byte) (Config, error) {
 		return c, err
 	}
 	c.QualityProbeAccept = qualityAccept
+	c.QualityProbeMode = strings.ToLower(strings.TrimSpace(c.QualityProbeMode))
+	if !hasQualityProbeMode {
+		if c.QualityProbeEnabled {
+			c.QualityProbeMode = qualityProbeStrict
+		} else {
+			c.QualityProbeMode = qualityProbeOff
+		}
+	}
+	if c.QualityProbeMode == "" {
+		c.QualityProbeMode = qualityProbeOff
+	}
+	switch c.QualityProbeMode {
+	case qualityProbeOff, qualityProbeStrict, qualityProbeStrictFallback:
+	default:
+		return c, errors.New("quality_probe_mode must be off, strict, or strict_fallback")
+	}
+	c.QualityProbeEnabled = c.QualityProbeMode != qualityProbeOff
 	if c.QualityProbeEnabled && (c.QualityProbePrompt == "" || c.QualityProbeAccept == "") {
 		return c, errors.New("quality probe requires a prompt and at least one accepted answer")
 	}
@@ -224,8 +263,8 @@ func ParseConfig(raw []byte) (Config, error) {
 	if c.UpstreamProxyID < 0 {
 		return c, errors.New("upstream_proxy_id must be nonnegative")
 	}
-	if c.TicketMode != ticketModeLegacy && c.TicketMode != ticketModeCookie {
-		return c, errors.New("ticket_mode must be legacy or cookie")
+	if c.TicketMode != ticketModeCookie {
+		return c, errors.New("ticket_mode must be cookie; legacy 292/332 mode was removed")
 	}
 	if c.CookieCaptureMode != captureModeGenerator && c.CookieCaptureMode != captureModeSOCKS5 {
 		return c, errors.New("cookie_capture_mode must be generator or socks5")
@@ -238,6 +277,9 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	if c.MaxAttempts < 1 || c.MaxAttempts > 32 {
 		return c, errors.New("max_attempts must be 1..32")
+	}
+	if c.MintConcurrency < 1 || c.MintConcurrency > 3 {
+		return c, errors.New("mint_concurrency must be 1..3")
 	}
 	if c.AttemptIntervalSeconds < 1 || c.AttemptIntervalSeconds > 300 {
 		return c, errors.New("attempt_interval_seconds must be 1..300")
@@ -260,13 +302,10 @@ func ParseConfig(raw []byte) (Config, error) {
 	if err := validateRequestTimezone(c.DefaultRequestTimezone); err != nil {
 		return c, err
 	}
-	if c.TicketMode == ticketModeCookie && c.StandbyLeadSeconds >= c.CookieTicketTTLSeconds {
+	if c.StandbyLeadSeconds >= c.CookieTicketTTLSeconds {
 		return c, errors.New("standby_lead_seconds must be less than cookie_ticket_ttl_seconds")
 	}
-	if c.TicketMode == ticketModeLegacy && c.StandbyLeadSeconds >= c.TTLMinutes*60 {
-		return c, errors.New("standby_lead_seconds must be less than ttl_minutes")
-	}
-	if c.AllowState780 && c.StandbyLeadSeconds >= c.State780TTLSeconds {
+	if c.StandbyLeadSeconds >= c.State780TTLSeconds {
 		return c, errors.New("standby_lead_seconds must be less than state_780_ttl_seconds")
 	}
 	if err := validateProxy(c.UpstreamProxyURL); err != nil {
@@ -300,8 +339,6 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	seen := map[int64]bool{}
 	anyEnabled := false
-	needsDynamicProxy := false
-	needsGenerator := false
 	needsCookieCaptureProxy := false
 	needsCookieGenerator := false
 	total := 0
@@ -361,9 +398,7 @@ func ParseConfig(raw []byte) (Config, error) {
 		}
 		total += len(a.Models)
 		anyEnabled = anyEnabled || a.Enabled
-		needsDynamicProxy = needsDynamicProxy || c.TicketMode == ticketModeLegacy && a.Enabled && a.EgressMode == egressModeSub2
-		needsGenerator = needsGenerator || c.TicketMode == ticketModeLegacy && a.Enabled && a.EgressMode == egressModeGenerator
-		if a.Enabled && c.TicketMode == ticketModeCookie {
+		if a.Enabled {
 			if c.CookieCaptureMode == captureModeSOCKS5 {
 				needsCookieCaptureProxy = true
 			} else {
@@ -373,12 +408,6 @@ func ParseConfig(raw []byte) (Config, error) {
 	}
 	if total > 1024 {
 		return c, errors.New("at most 1024 account/model pairs are supported")
-	}
-	if c.Enabled && anyEnabled && needsDynamicProxy && c.DynamicProxyURL == "" {
-		return c, errors.New("dynamic_proxy_url is required for enabled accounts using sub2 egress")
-	}
-	if c.Enabled && anyEnabled && needsGenerator && c.ProxyGeneratorURL == "" {
-		return c, errors.New("proxy_generator_url is required for enabled accounts using generator egress")
 	}
 	if c.Enabled && anyEnabled && needsCookieCaptureProxy && c.CookieCaptureProxyURL == "" {
 		return c, errors.New("cookie_capture_proxy_url is required for cookie ticket mode using socks5 capture")
@@ -641,7 +670,8 @@ func configFingerprint(c Config, a AccountConfig, model string) string {
 		strconv.FormatBool(c.AllowState780), strconv.Itoa(c.State780TTLSeconds),
 		c.GatewayPolicy, c.TargetGateway,
 		strconv.FormatBool(c.RouteCookieReuse), strconv.FormatBool(c.MintFingerprintConvergence),
-		strconv.FormatBool(c.QualityProbeEnabled), c.QualityProbePrompt, c.QualityProbeAccept,
+		strconv.FormatBool(c.QualityProbeEnabled), c.QualityProbeMode, c.QualityProbePrompt, c.QualityProbeAccept,
+		strconv.Itoa(c.MintConcurrency),
 		a.Plan, model, jsonText(struct {
 			ID             int64
 			TTL            int
@@ -712,6 +742,20 @@ func cloneCookies(source map[string]string) map[string]string {
 	}
 	return result
 }
+
+func configuredQualityProbeMode(c Config) string {
+	if c.QualityProbeEnabled {
+		if c.QualityProbeMode == qualityProbeStrictFallback {
+			return qualityProbeStrictFallback
+		}
+		return qualityProbeStrict
+	}
+	if c.QualityProbeMode != "" {
+		return c.QualityProbeMode
+	}
+	return qualityProbeOff
+}
+
 func targetLength(plan string) int {
 	if plan == "team" {
 		return 332
@@ -720,10 +764,10 @@ func targetLength(plan string) int {
 }
 
 func validPlanState(s string, plan string, allowState780 bool) bool {
-	if validState(s, targetLength(plan)) {
-		return true
+	if allowState780 {
+		return validState(s, compatStateLength)
 	}
-	return allowState780 && validState(s, compatStateLength)
+	return validState(s, targetLength(plan))
 }
 
 // STATE is opaque: only token-safe bytes and expected length are checked.

@@ -59,9 +59,10 @@ type Engine struct {
 	activeAfter      time.Time
 }
 type jobRecord struct {
-	Attempts      int
-	LastError     string
-	CooldownUntil time.Time
+	Attempts          int
+	LastError         string
+	CooldownUntil     time.Time
+	QualityRetryAfter time.Time
 }
 type ticket struct {
 	AccountID           int64             `json:"account_id"`
@@ -78,6 +79,7 @@ type ticket struct {
 	IssuedAt            time.Time         `json:"issued_at,omitempty"`
 	ExpiresAt           time.Time         `json:"expires_at"`
 	TicketMode          string            `json:"ticket_mode,omitempty"`
+	QualityStatus       string            `json:"quality_status,omitempty"`
 	SessionBound        bool              `json:"session_bound,omitempty"`
 	Gateway             string            `json:"gateway,omitempty"`
 	CaptureProxyURL     string            `json:"-"`
@@ -96,6 +98,7 @@ type receipt struct {
 	State, Version, Key, ConfigFingerprint string
 	TargetProxyURL, UpstreamProxyURL       string
 	TicketMode                             string
+	QualityStatus                          string
 	SessionBound                           bool
 	Gateway                                string
 	Cookies                                map[string]string
@@ -107,6 +110,7 @@ type statusTicket struct {
 	Model                   string `json:"model"`
 	Plan                    string `json:"plan"`
 	TicketMode              string `json:"ticket_mode"`
+	QualityStatus           string `json:"quality_status,omitempty"`
 	State                   string `json:"state"`
 	Status                  string `json:"status"`
 	RemainingSeconds        int64  `json:"remaining_seconds"`
@@ -244,14 +248,18 @@ func (e *Engine) ApplyConfig(_ context.Context, r *pluginv1.ApplyConfigRequest) 
 	if err != nil {
 		return &pluginv1.ApplyConfigResponse{Message: err.Error()}, nil
 	}
+	return e.applyConfig(c), nil
+}
+
+func (e *Engine) applyConfig(c Config) *pluginv1.ApplyConfigResponse {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return &pluginv1.ApplyConfigResponse{Message: "plugin stopped"}, nil
+		return &pluginv1.ApplyConfigResponse{Message: "plugin stopped"}
 	}
 	if jsonText(c) == jsonText(e.config) {
 		e.mu.Unlock()
-		return &pluginv1.ApplyConfigResponse{Applied: true, Message: "configuration unchanged"}, nil
+		return &pluginv1.ApplyConfigResponse{Applied: true, Message: "configuration unchanged"}
 	}
 	e.generationCancel()
 	e.generationCtx, e.generationCancel = context.WithCancel(e.ctx)
@@ -287,7 +295,7 @@ func (e *Engine) ApplyConfig(_ context.Context, r *pluginv1.ApplyConfigRequest) 
 	e.mu.Unlock()
 	e.clients.Close()
 	e.notify()
-	return &pluginv1.ApplyConfigResponse{Applied: true, Message: "configuration applied"}, nil
+	return &pluginv1.ApplyConfigResponse{Applied: true, Message: "configuration applied"}
 }
 func (e *Engine) TestConfig(_ context.Context, r *pluginv1.TestConfigRequest) (*pluginv1.TestConfigResponse, error) {
 	if r == nil {
@@ -450,6 +458,7 @@ func validTicket(t *ticket, c Config, a AccountConfig, model string, now time.Ti
 	if t == nil || t.AccountID != a.AccountID || t.Model != model || t.Plan != a.Plan ||
 		t.ConfigFingerprint != configFingerprint(c, a, model) || !validPlanState(t.State, a.Plan, c.AllowState780) ||
 		t.Version == "" || t.FixedFingerprint == "" || t.IdentityFingerprint == "" ||
+		(t.QualityStatus != "" && t.QualityStatus != ticketQualityVerified && t.QualityStatus != ticketQualityProvisional) ||
 		t.CapturedAt.IsZero() || t.CapturedAt.After(now.Add(time.Minute)) ||
 		!t.ExpiresAt.After(t.CapturedAt) || !now.Before(t.ExpiresAt) {
 		return false
@@ -580,6 +589,10 @@ func (e *Engine) snapshotLocked(now time.Time) statusSnapshot {
 			row := statusTicket{AccountID: a.AccountID, Model: model, Plan: a.Plan, TicketMode: e.config.TicketMode, State: "queued"}
 			valid := validTicket(t, e.config, a, model, now)
 			if t != nil {
+				row.QualityStatus = t.QualityStatus
+				if row.QualityStatus == "" {
+					row.QualityStatus = ticketQualityVerified
+				}
 				row.ExpiresAt = t.ExpiresAt.UTC().Format(time.RFC3339)
 				if valid {
 					row.RemainingSeconds = int64(t.ExpiresAt.Sub(now).Seconds())
@@ -603,12 +616,20 @@ func (e *Engine) snapshotLocked(now time.Time) statusSnapshot {
 				row.State = "waiting_account"
 			case e.jobs[k] == e.generation && e.generation != 0:
 				if valid {
-					row.State = "renewing"
+					if row.QualityStatus == ticketQualityProvisional {
+						row.State = "renewing_provisional"
+					} else {
+						row.State = "renewing"
+					}
 				} else {
 					row.State = "harvesting"
 				}
 			case valid:
-				row.State = "ready"
+				if row.QualityStatus == ticketQualityProvisional {
+					row.State = "ready_provisional"
+				} else {
+					row.State = "ready"
+				}
 			case r != nil && r.CooldownUntil.After(now):
 				row.State = "cooldown"
 			case t != nil:

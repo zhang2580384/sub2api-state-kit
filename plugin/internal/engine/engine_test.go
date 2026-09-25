@@ -101,11 +101,16 @@ func completedWithText(w http.ResponseWriter, model, text string) {
 }
 func testConfig(proxy string, ids ...int64) Config {
 	c := DefaultConfig()
+	// Unit tests exercise both retired and latest paths directly. Production
+	// ParseConfig always migrates this field to cookie + 780.
+	c.TicketMode = ticketModeLegacy
+	c.AllowState780 = false
+	c.MintConcurrency = 1
 	c.Enabled = true
 	c.DynamicProxyURL = proxy
 	c.MaxAttempts = 1
 	for _, id := range ids {
-		c.Accounts = append(c.Accounts, AccountConfig{AccountID: id, Enabled: true, Plan: "pro", Models: []string{"gpt-6-astra"}})
+		c.Accounts = append(c.Accounts, AccountConfig{AccountID: id, Enabled: true, EgressMode: egressModeSub2, Plan: "pro", Models: []string{"gpt-6-astra"}})
 	}
 	return c
 }
@@ -120,9 +125,9 @@ func testEngine(t *testing.T, h *fakeHost, url string) *Engine {
 }
 func apply(t *testing.T, e *Engine, c Config) {
 	t.Helper()
-	r, err := e.ApplyConfig(context.Background(), &pluginv1.ApplyConfigRequest{ConfigJson: []byte(jsonText(c))})
-	if err != nil || !r.Applied {
-		t.Fatalf("apply: %v %+v", err, r)
+	r := e.applyConfig(c)
+	if !r.Applied {
+		t.Fatalf("apply: %+v", r)
 	}
 }
 func waitFor(t *testing.T, e *Engine, state string) {
@@ -149,10 +154,11 @@ func TestConfigStrictIsolation(t *testing.T) {
 	if err != nil || c.Enabled || c.TTLMinutes != 180 || c.RefreshBeforeSeconds != 120 || c.PreferPreviousIP ||
 		c.GatewayPolicy != gatewayPolicyAllow || c.TargetGateway != "unified-15,unified-88,unified-180" ||
 		!c.RouteCookieReuse || !c.MintFingerprintConvergence || c.QualityProbeEnabled ||
-		c.QualityProbePrompt != "" || c.QualityProbeAccept != "" || len(c.Accounts) != 0 {
+		c.QualityProbeMode != qualityProbeOff || c.QualityProbePrompt != "" || c.QualityProbeAccept != "" ||
+		c.TicketMode != ticketModeCookie || !c.AllowState780 || c.MintConcurrency != 3 || len(c.Accounts) != 0 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
-	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"proxy_generator_ttl_minutes":181}`, `{"target_gateway":"unified-abc"}`, `{"target_gateway":"https://gateway.example"}`, `{"target_gateway":"any,unified-88"}`, `{"gateway_policy":"blocked"}`, `{"gateway_policy":"allow","target_gateway":"any"}`, `{"gateway_policy":"deny","target_gateway":""}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`, `{"quality_probe_enabled":true}`, `{"quality_probe_enabled":true,"quality_probe_prompt":"probe"}`, `{"quality_probe_enabled":true,"quality_probe_prompt":"probe","quality_probe_accept":",17"}`, `{"quality_probe_accept":"1,2,3,4,5,6,7,8,9"}`}
+	bad := []string{`{"unknown":true}`, `null`, `{"ttl_minutes":181}`, `{"ttl_minutes":5,"refresh_before_minutes":5}`, `{"ttl_minutes":1,"refresh_before_seconds":60}`, `{"max_attempts":33}`, `{"mint_concurrency":4}`, `{"proxy_generator_ttl_minutes":181}`, `{"target_gateway":"unified-abc"}`, `{"target_gateway":"https://gateway.example"}`, `{"target_gateway":"any,unified-88"}`, `{"gateway_policy":"blocked"}`, `{"gateway_policy":"allow","target_gateway":"any"}`, `{"gateway_policy":"deny","target_gateway":""}`, `{"enabled":true,"accounts":[{"account_id":1,"enabled":true}]}`, `{"accounts":[{"account_id":1},{"account_id":1}]}`, `{"accounts":[{"account_id":1,"models":["gpt-6-astra","gpt-6-astra"]}]}`, `{"dynamic_proxy_url":"file:///tmp/a"}`, `{"dynamic_proxy_url":"http://host/secret?token=x"}`, `{"accounts":[{"account_id":1,"plan":"wrong"}]}`, `{"accounts":[{"account_id":1,"email":"not-an-email"}]}`, `{"accounts":[{"account_id":1,"name":"bad\nname"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-{random}:pass@proxy.example:1080"}]}`, `{"accounts":[{"account_id":1,"egress_mode":"other","sticky_proxy_url":"socks5h://proxy.example:1080"}]}`, `{"quality_probe_enabled":true}`, `{"quality_probe_enabled":true,"quality_probe_prompt":"probe"}`, `{"quality_probe_enabled":true,"quality_probe_prompt":"probe","quality_probe_accept":",17"}`, `{"quality_probe_accept":"1,2,3,4,5,6,7,8,9"}`}
 	for _, raw := range bad {
 		if _, err := ParseConfig([]byte(raw)); err == nil {
 			t.Errorf("accepted invalid config %s", raw)
@@ -172,7 +178,7 @@ func TestConfigStrictIsolation(t *testing.T) {
 	if got.Name != "Example" || got.Email != "owner@example.com" || got.ExpiresAt != "2026-12-31 23:59" || got.Quota != "$12.50 / $20.00" {
 		t.Fatalf("display metadata not normalized: %+v", got)
 	}
-	plugin, err := ParseConfig([]byte(`{"enabled":true,"upstream_proxy_url":"socks5://first.example:1081","accounts":[{"account_id":9,"enabled":true,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-session-123:pass@us.example:10000"}]}`))
+	plugin, err := ParseConfig([]byte(`{"enabled":true,"upstream_proxy_url":"socks5://first.example:1081","proxy_generator_url":"https://generator.example/gen","accounts":[{"account_id":9,"enabled":true,"egress_mode":"plugin","sticky_proxy_url":"socks5h://user-session-123:pass@us.example:10000"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,8 +214,12 @@ func TestConfigStrictIsolation(t *testing.T) {
 		t.Fatalf("explicit any gateway policy was not normalized: %+v %v", anyPolicy, err)
 	}
 	quality, err := ParseConfig([]byte(`{"quality_probe_enabled":true,"quality_probe_prompt":"probe","quality_probe_accept":" 17, iphone 17 ,17"}`))
-	if err != nil || !quality.QualityProbeEnabled || quality.QualityProbePrompt != "probe" || quality.QualityProbeAccept != "17,iphone 17" {
+	if err != nil || !quality.QualityProbeEnabled || quality.QualityProbeMode != qualityProbeStrict || quality.QualityProbePrompt != "probe" || quality.QualityProbeAccept != "17,iphone 17" {
 		t.Fatalf("quality probe config was not normalized: %+v %v", quality, err)
+	}
+	fallback, err := ParseConfig([]byte(`{"ticket_mode":"legacy","allow_state_780":false,"quality_probe_mode":"strict_fallback","quality_probe_prompt":"probe","quality_probe_accept":"17","mint_concurrency":2}`))
+	if err != nil || fallback.TicketMode != ticketModeCookie || !fallback.AllowState780 || fallback.QualityProbeMode != qualityProbeStrictFallback || fallback.MintConcurrency != 2 {
+		t.Fatalf("latest-mode migration was not normalized: %+v %v", fallback, err)
 	}
 }
 
@@ -253,7 +263,7 @@ func TestCollectFixedProxyValidationAndPersistence(t *testing.T) {
 	pool := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dynamic.Add(1)
 		if r.Header.Get("Authorization") != "Bearer test-token-42" || r.Header.Get(StateHeader) != "" {
-			t.Error("dynamic identity or STATE incorrect")
+			t.Errorf("dynamic identity or STATE incorrect: authorization=%q state=%q", r.Header.Get("Authorization"), r.Header.Get(StateHeader))
 		}
 		w.Header().Set(StateHeader, testState(292))
 		completed(w, "gpt-6-astra")
@@ -378,6 +388,300 @@ func TestQualityProbeGatesNewTicket(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestQualityStrictFallbackPublishesProvisionalTicket(t *testing.T) {
+	h := testHost(42)
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"203.0.113.31"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"203.0.113.31"}`))
+			return
+		}
+		setTargetRouteCookies(w)
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "capture"})
+		w.Header().Set(StateHeader, testState(780))
+		completed(w, "gpt-6-astra")
+	}))
+	defer capture.Close()
+
+	var businessCalls atomic.Int32
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"198.51.100.31"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"198.51.100.31"}`))
+			return
+		}
+		call := businessCalls.Add(1)
+		setTargetRouteCookies(w)
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "business"})
+		w.Header().Set(StateHeader, testState(780))
+		if call == 2 {
+			completedWithText(w, "gpt-6-astra", "iPhone 16")
+			return
+		}
+		if call >= 4 {
+			completedWithText(w, "gpt-6-astra", "iPhone 17")
+			return
+		}
+		completed(w, "gpt-6-astra")
+	}))
+	defer business.Close()
+
+	e := testEngine(t, h, business.URL)
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := testConfig(capture.URL, 42)
+	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
+	c.MintConcurrency = 1
+	c.CookieCaptureMode = captureModeSOCKS5
+	c.CookieCaptureProxyURL = capture.URL
+	c.CookieBusinessProxyURL = business.URL
+	c.RouteCookieReuse = false
+	c.QualityProbeEnabled = true
+	c.QualityProbeMode = qualityProbeStrictFallback
+	c.QualityProbePrompt = "quality prompt"
+	c.QualityProbeAccept = "17"
+	c.AttemptIntervalSeconds = 1
+	apply(t, e, c)
+	waitFor(t, e, "ready_provisional")
+
+	e.mu.Lock()
+	current := e.tickets[keyFor(42, "gpt-6-astra")]
+	e.mu.Unlock()
+	if current == nil || current.QualityStatus != ticketQualityProvisional {
+		t.Fatalf("provisional ticket not published: %+v", current)
+	}
+	if businessCalls.Load() < 2 {
+		t.Fatalf("quality probe did not run: business calls=%d", businessCalls.Load())
+	}
+	waitFor(t, e, "ready")
+	e.mu.Lock()
+	current = e.tickets[keyFor(42, "gpt-6-astra")]
+	e.mu.Unlock()
+	if current == nil || current.QualityStatus != ticketQualityVerified {
+		t.Fatalf("provisional ticket was not upgraded in the background: %+v", current)
+	}
+}
+
+func TestQualityStrictFallbackKeepsProvisionalAliveAfterWorkerStops(t *testing.T) {
+	h := testHost(42)
+	var captureCalls atomic.Int32
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"203.0.113.71"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"203.0.113.71"}`))
+			return
+		}
+		if captureCalls.Add(1) == 1 {
+			setTargetRouteCookies(w)
+			http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "capture"})
+			w.Header().Set(StateHeader, testState(780))
+			completed(w, "gpt-6-astra")
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer capture.Close()
+
+	var businessCalls atomic.Int32
+	business := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"198.51.100.71"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"198.51.100.71"}`))
+			return
+		}
+		call := businessCalls.Add(1)
+		setTargetRouteCookies(w)
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "business"})
+		w.Header().Set(StateHeader, testState(780))
+		if call == 2 {
+			completedWithText(w, "gpt-6-astra", "iPhone 16")
+			return
+		}
+		completed(w, "gpt-6-astra")
+	}))
+	defer business.Close()
+
+	e := testEngine(t, h, business.URL)
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := DefaultConfig()
+	c.Enabled = true
+	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
+	c.MintConcurrency = 2
+	c.MaxAttempts = 2
+	c.CookieCaptureMode = captureModeSOCKS5
+	c.CookieCaptureProxyURL = capture.URL
+	c.CookieBusinessProxyURL = business.URL
+	c.RouteCookieReuse = false
+	c.QualityProbeMode = qualityProbeStrictFallback
+	c.QualityProbePrompt = "quality prompt"
+	c.QualityProbeAccept = "17"
+	c.AttemptIntervalSeconds = 1
+	c.Accounts = []AccountConfig{{AccountID: 42, Enabled: true, EgressMode: egressModeSub2, Plan: "pro", Models: []string{"gpt-6-astra"}}}
+	apply(t, e, c)
+	waitFor(t, e, "ready_provisional")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		e.mu.Lock()
+		current := e.tickets[keyFor(42, "gpt-6-astra")]
+		record := e.records[keyFor(42, "gpt-6-astra")]
+		valid := validTicket(current, e.config, e.config.Accounts[0], "gpt-6-astra", time.Now())
+		cooldown := record != nil && record.CooldownUntil.After(time.Now())
+		e.mu.Unlock()
+		if valid && current.QualityStatus == ticketQualityProvisional && !cooldown {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("provisional ticket entered cooldown after a concurrent upstream stop")
+}
+
+func TestCaptureCandidatesParallelizesSharedAttemptBudget(t *testing.T) {
+	h := testHost(42)
+	release := make(chan struct{})
+	var concurrent atomic.Int32
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"203.0.113.41"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"203.0.113.41"}`))
+			return
+		}
+		current := concurrent.Add(1)
+		if current == 3 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		concurrent.Add(-1)
+		setTargetRouteCookies(w)
+		w.Header().Set(StateHeader, testState(780))
+		completed(w, "gpt-6-astra")
+	}))
+	defer capture.Close()
+
+	e := newEngine(h, capture.URL, time.Second)
+	defer e.Close()
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := DefaultConfig()
+	c.Enabled = true
+	c.ProxyGeneratorBlockedCountries = []string{"HK"}
+	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
+	c.MintConcurrency = 3
+	c.CookieCaptureMode = captureModeSOCKS5
+	c.CookieCaptureProxyURL = capture.URL
+	c.RouteCookieReuse = false
+	a := AccountConfig{AccountID: 42, Enabled: true, EgressMode: egressModeSub2, Plan: "pro", Models: []string{"gpt-6-astra"}}
+
+	results, cancel := e.captureCandidates(context.Background(), h, c, a, "gpt-6-astra", keyFor(42, "gpt-6-astra"), 1, 3, false, false)
+	defer cancel()
+	select {
+	case <-release:
+	case <-time.After(3 * time.Second):
+		t.Fatal("three capture workers did not run concurrently")
+	}
+	count := 0
+	for range results {
+		count++
+	}
+	if count != 3 {
+		t.Fatalf("capture results=%d; want 3", count)
+	}
+}
+
+func TestCaptureCancellationStopsOtherWorkers(t *testing.T) {
+	h := testHost(42)
+	var probeOrder atomic.Int32
+	var allStarted sync.Once
+	allStartedCh := make(chan struct{})
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Hostname() {
+		case "egress.test":
+			_, _ = w.Write([]byte(`{"ip":"203.0.113.51"}`))
+			return
+		case "geo.test":
+			_, _ = w.Write([]byte(`{"status":"success","countryCode":"US","query":"203.0.113.51"}`))
+			return
+		}
+		order := probeOrder.Add(1)
+		if order == 3 {
+			allStarted.Do(func() { close(allStartedCh) })
+		}
+		if order > 1 {
+			time.Sleep(time.Second)
+			return
+		}
+		select {
+		case <-allStartedCh:
+		case <-r.Context().Done():
+			return
+		}
+		setTargetRouteCookies(w)
+		w.Header().Set(StateHeader, testState(780))
+		completed(w, "gpt-6-astra")
+	}))
+	defer capture.Close()
+
+	e := testEngine(t, h, capture.URL)
+	e.egressURL = "http://egress.test/ip"
+	e.geoURLs = []string{"http://geo.test/json/{ip}"}
+	c := DefaultConfig()
+	c.Enabled = true
+	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
+	c.MintConcurrency = 3
+	c.MaxAttempts = 3
+	c.CookieCaptureMode = captureModeSOCKS5
+	c.CookieCaptureProxyURL = capture.URL
+	c.CookieBusinessProxyURL = ""
+	c.RouteCookieReuse = false
+	c.Accounts = []AccountConfig{{AccountID: 42, Enabled: true, EgressMode: egressModeSub2, Plan: "pro", Models: []string{"gpt-6-astra"}}}
+
+	results, cancel := e.captureCandidates(context.Background(), h, c, c.Accounts[0], "gpt-6-astra", keyFor(42, "gpt-6-astra"), 1, 3, false, false)
+	select {
+	case result := <-results:
+		if result.Candidate == "" {
+			t.Fatal("first capture did not return a candidate")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("first capture did not complete")
+	}
+	cancel()
+	closed := make(chan struct{})
+	go func() {
+		for range results {
+		}
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("other capture workers did not stop after cancellation")
 	}
 }
 

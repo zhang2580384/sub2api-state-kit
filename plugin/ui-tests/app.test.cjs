@@ -18,7 +18,7 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7 }] }).accounts[0].egress_mode, 'sub2');
   assert.equal(ui.normalizeConfig({ accounts: [{ account_id: 7, name: ' Example ' }] }).accounts[0].name, 'Example');
   assert.equal(ui.normalizeConfig({}).prefer_previous_ip, false);
-  assert.equal(ui.normalizeConfig({}).allow_state_780, false);
+  assert.equal(ui.normalizeConfig({}).allow_state_780, true);
   assert.equal(ui.normalizeConfig({}).state_780_ttl_seconds, 240);
   assert.equal(ui.normalizeConfig({}).gateway_policy, 'allow');
   assert.equal(ui.normalizeConfig({}).target_gateway, 'unified-15,unified-88,unified-180');
@@ -28,12 +28,16 @@ test('empty configuration and newly imported accounts default off', () => {
   assert.equal(ui.normalizeConfig({}).route_cookie_reuse, true);
   assert.equal(ui.normalizeConfig({}).mint_fingerprint_convergence, true);
   assert.equal(ui.normalizeConfig({}).quality_probe_enabled, false);
+  assert.equal(ui.normalizeConfig({}).quality_probe_mode, 'off');
   assert.equal(ui.normalizeConfig({}).quality_probe_prompt, '');
   assert.equal(ui.normalizeConfig({}).quality_probe_accept, '');
-  assert.equal(ui.normalizeConfig({}).ticket_mode, 'legacy');
+  assert.equal(ui.normalizeConfig({}).ticket_mode, 'cookie');
+  assert.equal(ui.normalizeConfig({ ticket_mode: 'legacy', allow_state_780: false }).ticket_mode, 'cookie');
+  assert.equal(ui.normalizeConfig({ ticket_mode: 'legacy', allow_state_780: false }).allow_state_780, true);
   assert.equal(ui.normalizeConfig({}).cookie_capture_mode, 'generator');
-  assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 300);
+  assert.equal(ui.normalizeConfig({}).cookie_ticket_ttl_seconds, 240);
   assert.equal(ui.normalizeConfig({}).standby_lead_seconds, 90);
+  assert.equal(ui.normalizeConfig({}).mint_concurrency, 3);
   assert.equal(ui.normalizeConfig({}).request_rewrite_enabled, false);
   assert.equal(ui.normalizeConfig({}).default_request_timezone, 'Asia/Singapore');
   assert.equal(ui.validateConfig(configured()).enabled, false);
@@ -51,55 +55,28 @@ test('request timezone rewrite validates account overrides and restricted region
   assert.throws(() => ui.validateConfig(config), /不支持当前地区/);
 });
 
-test('quality probe is opt-in and normalizes accepted answer values', () => {
+test('quality probe modes are strict, strict fallback or off and normalize accepted answers', () => {
   assert.doesNotThrow(() => ui.validateConfig(configured()));
-  const config = configured({ quality_probe_enabled: true });
+  const config = configured({ quality_probe_enabled: true, quality_probe_mode: 'strict_fallback' });
   assert.throws(() => ui.validateConfig(config), /质量探针/);
   config.quality_probe_prompt = 'probe';
   config.quality_probe_accept = ' 17, iPhone 17 ,17 ';
   assert.equal(ui.validateConfig(config).quality_probe_accept, '17,iphone 17');
+  assert.equal(ui.validateConfig(config).quality_probe_mode, 'strict_fallback');
+  assert.equal(ui.validateConfig(config).quality_probe_enabled, true);
   config.quality_probe_accept = '1,2,3,4,5,6,7,8,9';
   assert.throws(() => ui.validateConfig(config), /最多填写 8 个/);
+  config.quality_probe_accept = '17';
+  config.quality_probe_mode = 'invalid';
+  assert.throws(() => ui.validateConfig(config), /模式格式/);
 });
 
-test('requires dynamic proxy only when global and account switches are both on', () => {
-  assert.doesNotThrow(() => ui.validateConfig(configured({ enabled: true })));
-  const config = configured({ enabled: true }); config.accounts[0].enabled = true;
-  assert.throws(() => ui.validateConfig(config), /填写动态代理/);
-  config.dynamic_proxy_url = 'socks5h://user-sid-{random}:placeholder@proxy.example:1080';
-  assert.equal(ui.validateConfig(config), config);
-  config.dynamic_proxy_url = 'javascript:alert(1)';
-  assert.throws(() => ui.validateConfig(config), /HTTP/);
-  config.dynamic_proxy_url = 'socks5h://proxy.example:1080';
-  config.upstream_proxy_url = 'socks5://first.example:1081';
-  assert.equal(ui.validateConfig(config), config);
-});
-
-test('account egress mode can use a fixed provider session without the global dynamic pool', () => {
-  const config = configured({ enabled: true });
+test('generator capture uses the first layer API and always blocks unknown or Hong Kong egress', () => {
+  const config = configured({ enabled: true, cookie_capture_mode: 'generator' });
   config.accounts[0].enabled = true;
-  config.accounts[0].egress_mode = 'plugin';
-  config.accounts[0].sticky_proxy_url = 'socks5h://user-session-123:pass@us.proxy.example:10000';
-  assert.equal(ui.validateConfig(config), config);
-  config.dynamic_proxy_url = '';
-  assert.equal(ui.validateConfig(config), config);
-  config.accounts[0].sticky_proxy_url = '';
-  assert.throws(() => ui.validateConfig(config), /必须填写账号粘性代理/);
-  config.accounts[0].sticky_proxy_url = 'socks5h://user-{random}:pass@us.proxy.example:10000';
-  assert.throws(() => ui.validateConfig(config), /固定 session/);
-  config.accounts[0].egress_mode = 'other';
-  assert.throws(() => ui.validateConfig(config), /选择 Sub2/);
-});
-
-test('generator egress uses the plugin API and always blocks unknown or Hong Kong egress', () => {
-  const config = configured({ enabled: true });
-  config.accounts[0].enabled = true;
-  config.accounts[0].egress_mode = 'generator';
-  config.accounts[0].sticky_proxy_url = '';
   assert.throws(() => ui.validateConfig(config), /填写代理生成器地址/);
   config.proxy_generator_url = 'https://generator.example/gen?zone=custom&sessType=sticky';
   config.proxy_generator_blocked_countries = ['us', 'hk', 'US'];
-  config.dynamic_proxy_url = '';
   assert.equal(ui.validateConfig(config), config);
   assert.deepEqual(config.proxy_generator_blocked_countries, ['HK', 'US']);
   config.proxy_generator_url = 'https://user:pass@generator.example/gen';
@@ -119,9 +96,9 @@ test('cookie mode validates capture and business egress independently', () => {
   config.cookie_capture_proxy_url = 'socks5h://capture-user:capture-pass@capture.example:1080';
   config.cookie_business_proxy_url = 'http://business-user:business-pass@business.example:8080';
   config.cookie_ticket_ttl_seconds = 300;
+  config.state_780_ttl_seconds = 300;
   config.standby_ticket_enabled = true;
   config.standby_lead_seconds = 90;
-  config.dynamic_proxy_url = '';
   assert.equal(ui.validateConfig(config), config);
   config.standby_lead_seconds = 300;
   assert.throws(() => ui.validateConfig(config), /备用票提前时间必须小于/);
@@ -130,30 +107,7 @@ test('cookie mode validates capture and business egress independently', () => {
   config.proxy_generator_url = '';
   assert.throws(() => ui.validateConfig(config), /请填写代理生成器地址/);
   config.proxy_generator_url = 'https://generator.example/gen?zone=custom';
-  config.ticket_mode = 'other';
-  assert.throws(() => ui.validateConfig(config), /运行方式/);
-});
-
-test('legacy mode supports standby tickets and always keeps the first-layer proxy visible', async () => {
-  const config = configured({ enabled: true, standby_ticket_enabled: true, standby_lead_seconds: 300, ttl_minutes: 10 });
-  config.accounts[0].enabled = true;
-  config.dynamic_proxy_url = 'socks5h://user-sid-{random}:placeholder@proxy.example:1080';
-  assert.doesNotThrow(() => ui.validateConfig(config));
-
-  const h = uiHarness(); await settle();
-  h.get('ticket-mode').value = 'cookie';
-  await h.get('ticket-mode').fire('change');
-  assert.equal(h.get('legacy-mode-fields').hidden, true);
-  assert.equal(h.get('upstream-proxy-url').hidden, false);
-  assert.equal(h.get('standby-ticket-enabled').disabled, false);
-  assert.equal(h.get('generator-fields').hidden, false);
-  assert.equal(h.get('cookie-socks5-fields').hidden, true);
-  h.get('cookie-capture-mode').value = 'socks5';
-  await h.get('cookie-capture-mode').fire('change');
-  assert.equal(h.get('generator-fields').hidden, true);
-  assert.equal(h.get('cookie-socks5-fields').hidden, false);
-  assert.equal(h.get('prefer-previous-fields').hidden, true);
-  h.runtime.stop();
+  assert.equal(ui.validateConfig(config).ticket_mode, 'cookie');
 });
 
 test('account labels omit empty fields instead of showing placeholder text', () => {
@@ -165,6 +119,7 @@ test('account labels omit empty fields instead of showing placeholder text', () 
 
 test('validates bounds, renewal horizon, duplicate accounts and model allowlist', () => {
   assert.throws(() => ui.validateConfig(configured({ max_attempts: 33 })), /1–32/);
+  assert.throws(() => ui.validateConfig(configured({ mint_concurrency: 4 })), /1–3/);
   assert.throws(() => ui.validateConfig(configured({ ttl_minutes: 181 })), /1–180/);
   assert.throws(() => ui.validateConfig(configured({ proxy_generator_ttl_minutes: 181 })), /1–180/);
   assert.doesNotThrow(() => ui.validateConfig(configured({ ttl_minutes: 180, refresh_before_seconds: 120, proxy_generator_ttl_minutes: 180 })));
@@ -194,7 +149,7 @@ test('validates bounds, renewal horizon, duplicate accounts and model allowlist'
   assert.throws(() => ui.validateConfig(config), /控制字符/);
 });
 
-test('legacy minute renewal horizon migrates to seconds', () => {
+test('legacy renewal horizon still loads without exposing it in the new UI', () => {
   assert.equal(ui.normalizeConfig({ refresh_before_minutes: 1 }).refresh_before_seconds, 60);
   assert.equal(ui.normalizeConfig({ refresh_before_seconds: 30, refresh_before_minutes: 1 }).refresh_before_seconds, 30);
 });
@@ -208,7 +163,9 @@ test('status tolerates pre-initialization, de-duplicates safe IDs, never labels 
   assert.equal(status.account_catalog[0].name, 'Eight');
   assert.deepEqual(ui.stateLabel('raw-sensitive-ticket-content'), ['未知状态', 'warning']);
   assert.deepEqual(ui.stateLabel('ready'), ['可用', 'success']);
+  assert.deepEqual(ui.stateLabel('ready_provisional'), ['可用 · 未通过质量', 'warning']);
   assert.deepEqual(ui.stateLabel('renewing'), ['可用 · 续期中', 'success']);
+  assert.deepEqual(ui.stateLabel('renewing_provisional'), ['可用 · 未通过质量 · 校验中', 'warning']);
   assert.equal(ui.errorLabel('unknown-raw-ticket'), '操作未完成，请检查账号与插件设置。');
   assert.equal(ui.errorLabel('upstream_rate_limited'), '上游限流（429）');
   assert.throws(() => ui.parseStatus({ status_json: 'broken{' }), /格式不正确/);
@@ -260,15 +217,18 @@ test('diagnostic events expose state classes and egress evidence without credent
   ]);
 });
 
-test('quality probe fields only enable after the opt-in switch is checked', async () => {
+test('quality probe fields follow the three-state mode selector', async () => {
   const h = uiHarness(); await settle();
   assert.equal(h.get('quality-probe-fields').hidden, true);
   assert.equal(h.get('quality-probe-prompt').disabled, true);
-  h.get('quality-probe-enabled').checked = true;
-  await h.get('quality-probe-enabled').fire('change');
+  h.get('quality-probe-mode').value = 'strict_fallback';
+  await h.get('quality-probe-mode').fire('change');
   assert.equal(h.get('quality-probe-fields').hidden, false);
   assert.equal(h.get('quality-probe-prompt').disabled, false);
   assert.equal(h.get('quality-probe-accept').disabled, false);
+  h.get('quality-probe-mode').value = 'off';
+  await h.get('quality-probe-mode').fire('change');
+  assert.equal(h.get('quality-probe-fields').hidden, true);
   h.runtime.stop();
 });
 
@@ -312,11 +272,11 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 
 test('passive status refresh preserves unsaved form and never invokes test or save', async () => {
   const h = uiHarness(); await settle();
-  h.get('dynamic-proxy-url').value = 'socks5h://unsaved:password@proxy.example:1080';
+  h.get('proxy-generator-url').value = 'https://unsaved.example/gen';
   await h.get('config-form').fire('input');
   h.setStatus({ host_ready: true, account_ids: [7, 12, 13], tickets: [] });
   await h.runtime.refreshStatus();
-  assert.equal(h.get('dynamic-proxy-url').value, 'socks5h://unsaved:password@proxy.example:1080');
+  assert.equal(h.get('proxy-generator-url').value, 'https://unsaved.example/gen');
   assert.equal(h.get('save-state').textContent, '有未保存修改');
   assert.equal(h.calls.load, 1); assert.equal(h.calls.save.length, 0); assert.equal(h.calls.test, 0);
   assert.equal(h.get('new-account-id').children.length, 4);
@@ -328,10 +288,8 @@ test('adding account defaults off, saved-config check does not save or overwrite
   h.get('new-account-id').value = '12'; await h.get('add-account').click();
   const row = h.get('accounts-body').children[1];
   assert.equal(row.children[2].children[0].checked, false);
-  assert.equal(row.children[3].children[0].value, 'sub2');
-  assert.equal(row.children[4].children[0].disabled, true);
-  assert.equal(row.children[5].children[0].value, 'pro');
-  assert.equal(row.children[6].children[0].getAttribute('list'), 'model-options');
+  assert.equal(row.children[3].children[0].value, 'pro');
+  assert.equal(row.children[4].children[0].getAttribute('list'), 'model-options');
   await h.get('test-config').click();
   assert.equal(h.calls.test, 1); assert.equal(h.calls.save.length, 0);
   assert.equal(h.get('accounts-body').children.length, 2);
@@ -366,13 +324,18 @@ test('explicit save button works without native form submission in sandbox', asy
 
 test('status rendering uses text nodes and never displays unrecognized raw state or model', async () => {
   const h = uiHarness(); await settle();
-  h.setStatus({ host_ready: true, account_ids: [7], account_catalog: [{ account_id: 7, name: '示例账号', email: 'owner@example.com' }], tickets: [{ account_id: 7, plan: 'pro', model: '<img src=x onerror=alert(1)>', state: 'SECRET-STATE-VALUE', last_error: 'x-codex-turn-state=SECRET-STATE-VALUE', remaining_seconds: 9 }] });
+  h.setStatus({ host_ready: true, account_ids: [7, 8], account_catalog: [{ account_id: 7, name: '示例账号', email: 'owner@example.com' }], tickets: [
+    { account_id: 7, plan: 'pro', model: 'gpt-6-astra', state: 'ready_provisional', quality_status: 'provisional', remaining_seconds: 9 },
+    { account_id: 8, plan: 'pro', model: '<img src=x onerror=alert(1)>', state: 'SECRET-STATE-VALUE', last_error: 'x-codex-turn-state=SECRET-STATE-VALUE', remaining_seconds: 9 }
+  ] });
   await h.runtime.refreshStatus();
   function text(node) { return String(node.textContent) + node.children.map(text).join(''); }
   const rendered = text(h.get('tickets-body'));
   assert.equal(rendered.includes('SECRET-STATE-VALUE'), false);
   assert.equal(rendered.includes('<img'), false);
   assert.match(rendered, /未知状态/);
+  assert.match(rendered, /可用 · 未通过质量/);
+  assert.match(rendered, /临时票 · 未通过质量/);
   assert.match(rendered, /账号：7 · 示例账号/);
   assert.match(rendered, /模型：未知模型/);
   h.runtime.stop();
@@ -386,7 +349,7 @@ test('detected account dropdown shows ID, name and email while model accepts pre
   h.get('new-account-id').value = '7';
   await h.get('add-account').click();
   assert.match(h.get('notice').textContent, /已在列表中/);
-  const model = h.get('accounts-body').children[0].children[6].children[0];
+  const model = h.get('accounts-body').children[0].children[4].children[0];
   model.value = 'gpt-5.6-sol, gpt-custom-model';
   await model.fire('input');
   await h.get('save-config').click();
@@ -394,54 +357,40 @@ test('detected account dropdown shows ID, name and email while model accepts pre
   h.runtime.stop();
 });
 
-test('account egress mode and sticky proxy are saved per account', async () => {
+test('new mode hides legacy per-account egress controls and saves neutral host-compatible fields', async () => {
   const h = uiHarness(); await settle();
-  const row = h.get('accounts-body').children[0];
-  const egress = row.children[3].children[0];
-  const sticky = row.children[4].children[0];
-  egress.value = 'plugin';
-  await egress.fire('change');
-  assert.equal(sticky.disabled, false);
-  sticky.value = 'socks5h://user-session-123:test-only@us.proxy.example:10000';
-  await sticky.fire('input');
+  assert.equal(h.get('accounts-body').children[0].children.length, 6);
   await h.get('save-config').click();
-  assert.equal(h.calls.save[0].accounts[0].egress_mode, 'plugin');
-  assert.equal(h.calls.save[0].accounts[0].sticky_proxy_url, sticky.value);
+  assert.equal(h.calls.save[0].accounts[0].egress_mode, 'sub2');
+  assert.equal(h.calls.save[0].accounts[0].sticky_proxy_url, '');
   h.runtime.stop();
 });
 
-test('generator URL, blocked countries and fixed TTL are saved and disable the sticky field', async () => {
+test('generator URL, blocked countries, concurrency and TTL are saved', async () => {
   const h = uiHarness(); await settle();
-  const row = h.get('accounts-body').children[0];
-  const egress = row.children[3].children[0];
-  const sticky = row.children[4].children[0];
-  egress.value = 'generator';
-  await egress.fire('change');
-  assert.equal(sticky.disabled, true);
   h.get('proxy-generator-url').value = 'https://generator.example/gen?zone=custom&sessType=sticky';
   h.get('proxy-generator-blocked-countries').value = 'us, hk, vn';
   h.get('prefer-previous-ip').checked = true;
   h.get('proxy-generator-ttl-minutes').value = '6';
-  h.get('refresh-before-seconds').value = '30';
+  h.get('cookie-ticket-ttl-seconds').value = '300';
+  h.get('mint-concurrency').value = '2';
   await h.get('config-form').fire('input');
   await h.get('save-config').click();
-  assert.equal(h.calls.save[0].accounts[0].egress_mode, 'generator');
-  assert.equal(h.calls.save[0].accounts[0].sticky_proxy_url, '');
   assert.equal(h.calls.save[0].proxy_generator_url, 'https://generator.example/gen?zone=custom&sessType=sticky');
   assert.deepEqual(h.calls.save[0].proxy_generator_blocked_countries, ['HK', 'US', 'VN']);
   assert.equal(h.calls.save[0].prefer_previous_ip, true);
   assert.equal(h.calls.save[0].proxy_generator_ttl_minutes, 6);
-  assert.equal(h.calls.save[0].refresh_before_seconds, 30);
+  assert.equal(h.calls.save[0].cookie_ticket_ttl_seconds, 300);
+  assert.equal(h.calls.save[0].state_780_ttl_seconds, 300);
+  assert.equal(h.calls.save[0].mint_concurrency, 2);
   h.runtime.stop();
 });
 
-test('780 compatibility is explicit and saved with the advanced state policy', async () => {
+test('cookie and 780 are fixed while advanced gateway and retry policy remain configurable', async () => {
   const h = uiHarness(); await settle();
-  assert.equal(h.get('allow-state-780').checked, false);
-  h.get('allow-state-780').checked = true;
   h.get('route-cookie-reuse').checked = true;
   h.get('mint-fingerprint-convergence').checked = true;
-  h.get('state-780-ttl-seconds').value = '240';
+  h.get('cookie-ticket-ttl-seconds').value = '240';
   h.get('gateway-policy').value = 'any';
   await h.get('gateway-policy').fire('change');
   assert.equal(h.get('target-gateway').disabled, true);
@@ -452,8 +401,10 @@ test('780 compatibility is explicit and saved with the advanced state policy', a
   await h.get('config-form').fire('change');
   await h.get('save-config').click();
   assert.equal(h.calls.save.length, 1);
+  assert.equal(h.calls.save[0].ticket_mode, 'cookie');
   assert.equal(h.calls.save[0].allow_state_780, true);
   assert.equal(h.calls.save[0].state_780_ttl_seconds, 240);
+  assert.equal(h.calls.save[0].cookie_ticket_ttl_seconds, 240);
   assert.equal(h.calls.save[0].gateway_policy, 'deny');
   assert.equal(h.calls.save[0].target_gateway, 'unified-15,unified-88,unified-180');
   assert.equal(h.calls.save[0].route_cookie_reuse, true);
@@ -477,9 +428,6 @@ test('request rewrite switch, default timezone and account timezone are persiste
 
 test('cookie split mode saves capture, business, TTL and standby controls', async () => {
   const h = uiHarness(); await settle();
-  h.get('ticket-mode').value = 'cookie';
-  await h.get('ticket-mode').fire('change');
-  assert.equal(h.get('legacy-mode-fields').hidden, true);
   assert.equal(h.get('cookie-mode-fields').hidden, false);
   h.get('cookie-capture-mode').value = 'socks5';
   await h.get('cookie-capture-mode').fire('change');
@@ -496,6 +444,7 @@ test('cookie split mode saves capture, business, TTL and standby controls', asyn
   assert.equal(h.calls.save[0].cookie_capture_proxy_url, 'socks5h://capture-user:capture-pass@capture.example:1080');
   assert.equal(h.calls.save[0].cookie_business_proxy_url, 'http://business-user:business-pass@business.example:8080');
   assert.equal(h.calls.save[0].cookie_ticket_ttl_seconds, 300);
+  assert.equal(h.calls.save[0].state_780_ttl_seconds, 300);
   assert.equal(h.calls.save[0].standby_ticket_enabled, true);
   assert.equal(h.calls.save[0].standby_lead_seconds, 90);
   h.runtime.stop();

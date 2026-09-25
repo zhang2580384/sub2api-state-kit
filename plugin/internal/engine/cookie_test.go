@@ -34,8 +34,9 @@ func TestCookieModeSplitsCaptureAndBusinessAndQueuesStandby(t *testing.T) {
 			t.Error("cookie capture omitted session_id")
 		}
 		captureCalls.Add(1)
+		setTargetRouteCookies(w)
 		http.SetCookie(w, &http.Cookie{Name: "capture", Value: "one"})
-		w.Header().Set(StateHeader, testState(292))
+		w.Header().Set(StateHeader, testState(780))
 		completed(w, "gpt-6-astra")
 	}))
 	defer capture.Close()
@@ -65,8 +66,9 @@ func TestCookieModeSplitsCaptureAndBusinessAndQueuesStandby(t *testing.T) {
 		}
 		businessSessions[sessionID] = true
 		businessCalls.Add(1)
+		setTargetRouteCookies(w)
 		http.SetCookie(w, &http.Cookie{Name: "business", Value: "two"})
-		w.Header().Set(StateHeader, testState(292))
+		w.Header().Set(StateHeader, testState(780))
 		completed(w, "gpt-6-astra")
 	}))
 	defer business.Close()
@@ -76,9 +78,11 @@ func TestCookieModeSplitsCaptureAndBusinessAndQueuesStandby(t *testing.T) {
 	e.geoURLs = []string{"http://geo.test/json/{ip}"}
 	c := testConfig(capture.URL, 42)
 	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
 	c.CookieCaptureMode = captureModeSOCKS5
 	c.CookieCaptureProxyURL = capture.URL
 	c.CookieBusinessProxyURL = business.URL
+	c.RouteCookieReuse = false
 	c.CookieTicketTTLSeconds = 30
 	c.StandbyTicketEnabled = true
 	c.StandbyLeadSeconds = 29
@@ -198,7 +202,7 @@ func TestCookieBusinessResponseRollsStateForward(t *testing.T) {
 	c.AllowState780 = true
 	a := AccountConfig{AccountID: 7, Plan: "pro", Enabled: true, Models: []string{"gpt-6-astra"}}
 	current := &ticket{
-		AccountID: 7, Model: "gpt-6-astra", Plan: "pro", State: testState(292), Version: "version",
+		AccountID: 7, Model: "gpt-6-astra", Plan: "pro", State: testState(780), Version: "version",
 		ConfigFingerprint: configFingerprint(c, a, "gpt-6-astra"), TicketMode: ticketModeCookie,
 		Cookies: map[string]string{"__cf_bm": "old", "__cflb": "lb", "__oailb": "unified-88"}, SessionID: "session",
 	}
@@ -246,10 +250,11 @@ func TestStandbyPromotionRequiresBusinessEgressAndIdentity(t *testing.T) {
 func TestCookieTicketRequiresSessionAndCookie(t *testing.T) {
 	c := DefaultConfig()
 	c.TicketMode = ticketModeCookie
+	c.AllowState780 = true
 	a := AccountConfig{AccountID: 7, Plan: "pro", Enabled: true, Models: []string{"gpt-6-astra"}}
 	now := time.Now()
 	ticket := ticket{
-		AccountID: 7, Model: "gpt-6-astra", Plan: "pro", State: testState(292), Version: "version",
+		AccountID: 7, Model: "gpt-6-astra", Plan: "pro", State: testState(780), Version: "version",
 		ConfigFingerprint: configFingerprint(c, a, "gpt-6-astra"), FixedFingerprint: "fixed",
 		IdentityFingerprint: "identity", CapturedAt: now.Add(-time.Second), ExpiresAt: now.Add(30 * time.Second),
 		TicketMode: ticketModeCookie,
@@ -261,7 +266,7 @@ func TestCookieTicketRequiresSessionAndCookie(t *testing.T) {
 	if validTicket(&ticket, c, a, "gpt-6-astra", now) {
 		t.Fatal("cookie ticket without cookies was accepted")
 	}
-	ticket.Cookies = map[string]string{"session": "cookie"}
+	ticket.Cookies = map[string]string{"__cflb": "lb", "__oailb": "unified-88"}
 	if !validTicket(&ticket, c, a, "gpt-6-astra", now) {
 		t.Fatal("complete cookie ticket was rejected")
 	}

@@ -7,23 +7,26 @@
   'use strict';
   const DEFAULT_CONFIG = Object.freeze({ enabled: false, upstream_proxy_id: 0, upstream_proxy_url: '', dynamic_proxy_url: '',
     proxy_generator_url: '', proxy_generator_blocked_countries: ['HK'], proxy_generator_ttl_minutes: 180, prefer_previous_ip: false,
-    allow_state_780: false, state_780_ttl_seconds: 240, gateway_policy: 'allow', target_gateway: 'unified-15,unified-88,unified-180',
+    allow_state_780: true, state_780_ttl_seconds: 240, gateway_policy: 'allow', target_gateway: 'unified-15,unified-88,unified-180',
     route_cookie_reuse: true, mint_fingerprint_convergence: true,
-    quality_probe_enabled: false, quality_probe_prompt: '', quality_probe_accept: '',
-    ticket_mode: 'legacy', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
-    cookie_ticket_ttl_seconds: 300, standby_ticket_enabled: false, standby_lead_seconds: 90,
+    quality_probe_enabled: false, quality_probe_mode: 'off', quality_probe_prompt: '', quality_probe_accept: '',
+    ticket_mode: 'cookie', cookie_capture_mode: 'generator', cookie_capture_proxy_url: '', cookie_business_proxy_url: '',
+    cookie_ticket_ttl_seconds: 240, standby_ticket_enabled: false, standby_lead_seconds: 90,
     request_rewrite_enabled: false, default_request_timezone: 'Asia/Singapore',
-    ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, attempt_interval_seconds: 10, cooldown_seconds: 300 });
+    ttl_minutes: 180, refresh_before_seconds: 120, max_attempts: 8, mint_concurrency: 3, attempt_interval_seconds: 10, cooldown_seconds: 300 });
   const NUMBERS = Object.freeze({ ttl_minutes: [1, 180, '旧模式票据有效期'], refresh_before_seconds: [0, 3599, '旧模式提前续期'],
     proxy_generator_ttl_minutes: [1, 180, '生成器出口有效期'], max_attempts: [1, 32, '每轮最多尝试'],
     cookie_ticket_ttl_seconds: [30, 1800, 'Cookie 票据持续期'], state_780_ttl_seconds: [30, 1800, '780 票据持续期'],
+    mint_concurrency: [1, 3, '并发打票数'],
     standby_lead_seconds: [10, 600, '备用票提前时间'],
     attempt_interval_seconds: [1, 300, '常规重试间隔'], cooldown_seconds: [30, 3600, '失败后冷却'] });
   const MAX_DIAGNOSTIC_EVENTS = 5000;
   const MAX_DIAGNOSTIC_VIEW_EVENTS = 2000;
   const STATES = Object.freeze({ disabled: ['已关闭', ''], waiting_host: ['等待宿主', 'warning'],
     waiting_account: ['等待账号', 'warning'], queued: ['等待获取', ''], harvesting: ['正在获取', ''],
-    ready: ['可用', 'success'], renewing: ['可用 · 续期中', 'success'], cooldown: ['冷却中', 'warning'],
+    ready: ['可用', 'success'], ready_provisional: ['可用 · 未通过质量', 'warning'],
+    renewing: ['可用 · 续期中', 'success'], renewing_provisional: ['可用 · 未通过质量 · 校验中', 'warning'],
+    cooldown: ['冷却中', 'warning'],
     expired: ['已过期', 'warning'], error: ['获取失败', 'error'] });
   const MODEL_PATTERN = /^gpt-[A-Za-z0-9][A-Za-z0-9._-]{0,94}$/;
   const ACCOUNT_TEXT_LIMITS = Object.freeze({ name: 120, email: 254, expires_at: 64, quota: 80, request_timezone: 64 });
@@ -46,6 +49,7 @@
     upstream_rate_limited: '上游限流（429）', upstream_rejected: '上游拒绝请求', model_mismatch: '返回模型不匹配，正在重新获取票据',
     state_312: '收到 312 状态，正在重新获取票据', model_mismatch_persistence_failed: '返回模型不匹配，票据失效记录保存失败',
     state_312_persistence_failed: '收到 312 状态，票据失效记录保存失败',
+    quality_provisional_published: '临时票已发布，后台继续寻找严格合格票',
     quality_probe_failed: '质量探针请求失败，正在重新获取票据', quality_mismatch: '票据未通过质量门槛，正在重新获取',
     quality_state_312: '质量探针收到 312 状态，正在重新获取票据', quality_unexpected_state: '质量探针返回了不支持的票据长度',
     quality_session_incomplete: '质量探针会话不完整，正在重新获取票据',
@@ -207,6 +211,16 @@
         config[key] = key === 'proxy_generator_blocked_countries' && Array.isArray(source[key]) ? source[key].slice() : source[key];
       }
     });
+    config.ticket_mode = 'cookie';
+    config.allow_state_780 = true;
+    if (source.quality_probe_mode === undefined) {
+      config.quality_probe_mode = source.quality_probe_enabled === true ? 'strict' : 'off';
+    }
+    if (!['off', 'strict', 'strict_fallback'].includes(config.quality_probe_mode)) config.quality_probe_mode = 'off';
+    config.quality_probe_enabled = config.quality_probe_mode !== 'off';
+    if (Number.isInteger(source.state_780_ttl_seconds) && Number.isInteger(source.cookie_ticket_ttl_seconds)) {
+      config.cookie_ticket_ttl_seconds = Math.min(source.cookie_ticket_ttl_seconds, source.state_780_ttl_seconds);
+    }
     config.accounts = Array.isArray(source.accounts) ? source.accounts.map(function (account) {
       return { account_id: account.account_id, name: accountText(account.name, 'name'),
         email: accountText(account.email, 'email'), expires_at: accountText(account.expires_at, 'expires_at'),
@@ -220,22 +234,23 @@
   function validateConfig(config) {
     if (typeof config.enabled !== 'boolean') throw new Error('总开关格式不正确。');
     validateProxyAddress(config.upstream_proxy_url, '第一层代理');
-    validateProxyAddress(config.dynamic_proxy_url, '动态代理');
-    validateProxyAddress(config.cookie_capture_proxy_url, 'Cookie 模式采集代理');
-    validateProxyAddress(config.cookie_business_proxy_url, 'Cookie 模式业务固定代理');
+    validateProxyAddress(config.cookie_capture_proxy_url, '打票采集代理');
+    validateProxyAddress(config.cookie_business_proxy_url, '业务固定代理');
     config.proxy_generator_url = typeof config.proxy_generator_url === 'string' ? config.proxy_generator_url.trim() : '';
     validateGeneratorURL(config.proxy_generator_url);
     config.proxy_generator_blocked_countries = normalizeBlockedCountries(config.proxy_generator_blocked_countries);
     if (typeof config.prefer_previous_ip !== 'boolean') throw new Error('上一轮可用出口复用开关格式不正确。');
-    if (typeof config.allow_state_780 !== 'boolean') throw new Error('780 状态兼容开关格式不正确。');
+    config.allow_state_780 = true;
     if (typeof config.route_cookie_reuse !== 'boolean') throw new Error('网关 Cookie 复用开关格式不正确。');
     if (typeof config.mint_fingerprint_convergence !== 'boolean') throw new Error('打票指纹收敛开关格式不正确。');
-    if (typeof config.quality_probe_enabled !== 'boolean') throw new Error('质量探针开关格式不正确。');
+    config.quality_probe_mode = typeof config.quality_probe_mode === 'string' ? config.quality_probe_mode.trim() : '';
+    if (!['off', 'strict', 'strict_fallback'].includes(config.quality_probe_mode)) throw new Error('质量探针模式格式不正确。');
     config.quality_probe_prompt = typeof config.quality_probe_prompt === 'string' ? config.quality_probe_prompt.trim() : '';
     if (Array.from(config.quality_probe_prompt).length > 1000 || /[\u0000-\u001f\u007f]/.test(config.quality_probe_prompt)) {
       throw new Error('质量探针提示词过长或包含控制字符。');
     }
     config.quality_probe_accept = normalizeQualityProbeAccept(config.quality_probe_accept);
+    config.quality_probe_enabled = config.quality_probe_mode !== 'off';
     if (config.quality_probe_enabled && (!config.quality_probe_prompt || !config.quality_probe_accept)) {
       throw new Error('启用质量探针后，必须填写提示词和至少一个通过答案。');
     }
@@ -248,8 +263,8 @@
     }
     if (typeof config.request_rewrite_enabled !== 'boolean') throw new Error('请求环境替换开关格式不正确。');
     config.default_request_timezone = validateTimezone(config.default_request_timezone, '默认请求时区');
-    if (!['legacy', 'cookie'].includes(config.ticket_mode)) throw new Error('运行方式须选择稳定同出口或 Cookie 分流。');
-    if (!['generator', 'socks5'].includes(config.cookie_capture_mode)) throw new Error('Cookie 模式打票方式须选择代理生成器或 S5/HTTP 固定代理。');
+    config.ticket_mode = 'cookie';
+    if (!['generator', 'socks5'].includes(config.cookie_capture_mode)) throw new Error('打票方式须选择代理生成器或 S5/HTTP 固定代理。');
     if (typeof config.standby_ticket_enabled !== 'boolean') throw new Error('备用票队列开关格式不正确。');
     Object.keys(NUMBERS).forEach(function (key) {
       const bounds = NUMBERS[key];
@@ -258,13 +273,10 @@
       }
     });
     if (config.refresh_before_seconds >= config.ttl_minutes * 60) throw new Error('提前续期必须小于票据有效期。');
-    if (config.ticket_mode === 'cookie' && config.standby_lead_seconds >= config.cookie_ticket_ttl_seconds) {
+    if (config.standby_lead_seconds >= config.cookie_ticket_ttl_seconds) {
       throw new Error('备用票提前时间必须小于 Cookie 票据持续期。');
     }
-    if (config.ticket_mode === 'legacy' && config.standby_lead_seconds >= config.ttl_minutes * 60) {
-      throw new Error('备用票提前时间必须小于旧模式票据有效期。');
-    }
-    if (config.allow_state_780 && config.standby_lead_seconds >= config.state_780_ttl_seconds) {
+    if (config.standby_lead_seconds >= config.state_780_ttl_seconds) {
       throw new Error('备用票提前时间必须小于 780 票据持续期。');
     }
     if (!Array.isArray(config.accounts) || config.accounts.length > 256) throw new Error('最多配置 256 个账号。');
@@ -297,15 +309,9 @@
       });
     });
     if (totalModels > 1024) throw new Error('最多配置 1024 个账号与模型组合。');
-    if (config.enabled && config.ticket_mode === 'legacy' && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'sub2'; }) && !config.dynamic_proxy_url) {
-      throw new Error('启用 Sub2 原有代理模式的账号前，请填写动态代理地址。');
-    }
-    if (config.enabled && config.ticket_mode === 'legacy' && config.accounts.some(function (account) { return account.enabled && account.egress_mode === 'generator'; }) && !config.proxy_generator_url) {
-      throw new Error('启用代理生成器出口模式的账号前，请填写代理生成器地址。');
-    }
-    if (config.enabled && config.ticket_mode === 'cookie' && config.accounts.some(function (account) { return account.enabled; })) {
-      if (config.cookie_capture_mode === 'socks5' && !config.cookie_capture_proxy_url) throw new Error('Cookie 模式选择 S5/HTTP 固定采集代理时，请填写采集代理。');
-      if (config.cookie_capture_mode === 'generator' && !config.proxy_generator_url) throw new Error('Cookie 模式选择代理生成器打票时，请填写代理生成器地址。');
+    if (config.enabled && config.accounts.some(function (account) { return account.enabled; })) {
+      if (config.cookie_capture_mode === 'socks5' && !config.cookie_capture_proxy_url) throw new Error('选择 S5/HTTP 固定采集代理时，请填写采集代理。');
+      if (config.cookie_capture_mode === 'generator' && !config.proxy_generator_url) throw new Error('选择代理生成器打票时，请填写代理生成器地址。');
     }
     return config;
   }
@@ -325,15 +331,16 @@
       generator_failed: '生成器调用失败', egress_unavailable: '出口不可用', region_blocked: '地区被阻止',
       egress_changed: '出口 IP 不一致', session_incomplete: '会话不完整',
       gateway_unavailable: '未取得目标网关', gateway_unknown: '网关无法识别', gateway_mismatch: '网关不匹配',
-      quality_mismatch: '质量未通过' })[outcome] || '未知结果';
+      quality_mismatch: '质量未通过', provisional_accepted: '临时票已保活' })[outcome] || '未知结果';
   }
   function diagnosticQualityLabel(value) {
-    return ({ matched: '质量通过', passed: '质量通过', failed: '质量未通过', mismatch: '质量未通过' })[value] || value || '未探测';
+    return ({ matched: '质量通过', passed: '质量通过', failed: '质量未通过', mismatch: '质量未通过',
+      provisional: '临时票保活' })[value] || value || '未探测';
   }
   function diagnosticOutcomeClass(outcome) {
     if (outcome === 'accepted' || outcome === 'model_match') return 'badge success';
     if (outcome === 'model_mismatch' || outcome === 'state_312' || outcome === 'validation_failed' ||
-      outcome === 'quality_mismatch' || outcome === 'unexpected_state') return 'badge warning';
+      outcome === 'quality_mismatch' || outcome === 'provisional_accepted' || outcome === 'unexpected_state') return 'badge warning';
     return 'badge error';
   }
   function diagnosticGatewayStats(events) {
@@ -460,11 +467,10 @@
     let lastDiagnostics = [];
     let diagnosticsRetained = 0;
     let diagnosticsRenderedSignature = '';
-    const numberIDs = { ttl_minutes: 'ttl-minutes', refresh_before_seconds: 'refresh-before-seconds',
-      proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
-      cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', state_780_ttl_seconds: 'state-780-ttl-seconds',
-      standby_lead_seconds: 'standby-lead-seconds',
-      max_attempts: 'max-attempts', attempt_interval_seconds: 'attempt-interval-seconds', cooldown_seconds: 'cooldown-seconds' };
+    const numberIDs = { proxy_generator_ttl_minutes: 'proxy-generator-ttl-minutes',
+      cookie_ticket_ttl_seconds: 'cookie-ticket-ttl-seconds', standby_lead_seconds: 'standby-lead-seconds',
+      max_attempts: 'max-attempts', mint_concurrency: 'mint-concurrency',
+      attempt_interval_seconds: 'attempt-interval-seconds', cooldown_seconds: 'cooldown-seconds' };
     function element(tag, text, className) {
       const node = document.createElement(tag);
       if (text !== undefined) node.textContent = String(text);
@@ -488,23 +494,20 @@
       byID('target-gateway').required = !unrestricted;
     }
     function renderQualityProbe() {
-      const enabled = byID('quality-probe-enabled').checked;
+      const enabled = byID('quality-probe-mode').value !== 'off';
       byID('quality-probe-fields').hidden = !enabled;
       byID('quality-probe-prompt').disabled = !enabled;
       byID('quality-probe-accept').disabled = !enabled;
       byID('quality-probe-prompt').required = enabled;
       byID('quality-probe-accept').required = enabled;
     }
-    function renderTicketMode() {
-      const cookieMode = byID('ticket-mode').value === 'cookie';
-      const generatorCapture = !cookieMode || byID('cookie-capture-mode').value === 'generator';
-      byID('legacy-mode-fields').hidden = cookieMode;
-      byID('cookie-mode-fields').hidden = !cookieMode;
-      byID('cookie-socks5-fields').hidden = !cookieMode || generatorCapture;
+    function renderCaptureMode() {
+      const generatorCapture = byID('cookie-capture-mode').value === 'generator';
+      byID('cookie-socks5-fields').hidden = generatorCapture;
       byID('generator-fields').hidden = !generatorCapture;
       byID('prefer-previous-fields').hidden = !generatorCapture;
-      byID('cookie-capture-proxy-url').disabled = !cookieMode || byID('cookie-capture-mode').value !== 'socks5';
-      byID('cookie-business-proxy-url').disabled = !cookieMode;
+      byID('cookie-capture-proxy-url').disabled = generatorCapture;
+      byID('cookie-business-proxy-url').disabled = false;
       byID('standby-ticket-enabled').disabled = false;
       byID('standby-lead-seconds').disabled = !byID('standby-ticket-enabled').checked;
       renderGatewayPolicy();
@@ -559,35 +562,9 @@
         enabled.addEventListener('change', function () { account.enabled = enabled.checked; markDirty(); });
         enabledCell.appendChild(enabled); row.appendChild(enabledCell);
 
-        const egressCell = element('td');
-        const egressMode = element('select');
-        egressMode.setAttribute('aria-label', '账号 ' + account.account_id + ' 的出口模式');
-        [['sub2', 'Sub2 原有代理'], ['plugin', '账号粘性代理'], ['generator', '代理生成器']].forEach(function (entry) {
-          const option = element('option', entry[1]); option.value = entry[0]; egressMode.appendChild(option);
-        });
-        egressMode.value = account.egress_mode;
-        egressCell.appendChild(egressMode); row.appendChild(egressCell);
-
-        const stickyCell = element('td');
-        const sticky = element('input');
-        sticky.type = 'password';
-        sticky.value = account.sticky_proxy_url || '';
-        sticky.placeholder = 'socks5h://user-session-...:pass@host:port';
-        sticky.autocomplete = 'new-password';
-        sticky.spellcheck = false;
-        sticky.disabled = account.egress_mode !== 'plugin';
-        sticky.setAttribute('aria-label', '账号 ' + account.account_id + ' 的账号粘性代理');
-        sticky.addEventListener('input', function () { account.sticky_proxy_url = sticky.value.trim(); markDirty(); });
-        egressMode.addEventListener('change', function () {
-          account.egress_mode = egressMode.value;
-          sticky.disabled = account.egress_mode !== 'plugin';
-          markDirty();
-        });
-        stickyCell.appendChild(sticky); row.appendChild(stickyCell);
-
         const planCell = element('td');
         const plan = element('select'); plan.setAttribute('aria-label', '账号 ' + account.account_id + ' 的套餐');
-        [['pro', 'Pro · 292'], ['team', 'Team · 332']].forEach(function (entry) {
+        [['pro', 'Pro'], ['team', 'Team']].forEach(function (entry) {
           const option = element('option', entry[1]); option.value = entry[0]; plan.appendChild(option);
         });
         plan.value = account.plan;
@@ -634,8 +611,6 @@
       const config = normalizeConfig(input);
       byID('enabled').checked = config.enabled === true;
       byID('upstream-proxy-url').value = config.upstream_proxy_url;
-      byID('dynamic-proxy-url').value = config.dynamic_proxy_url;
-      byID('ticket-mode').value = config.ticket_mode;
       byID('cookie-capture-mode').value = config.cookie_capture_mode;
       byID('cookie-capture-proxy-url').value = config.cookie_capture_proxy_url;
       byID('cookie-business-proxy-url').value = config.cookie_business_proxy_url;
@@ -643,10 +618,9 @@
       byID('proxy-generator-url').value = config.proxy_generator_url;
       byID('proxy-generator-blocked-countries').value = config.proxy_generator_blocked_countries.join(', ');
       byID('prefer-previous-ip').checked = config.prefer_previous_ip === true;
-      byID('allow-state-780').checked = config.allow_state_780 === true;
       byID('route-cookie-reuse').checked = config.route_cookie_reuse === true;
       byID('mint-fingerprint-convergence').checked = config.mint_fingerprint_convergence === true;
-      byID('quality-probe-enabled').checked = config.quality_probe_enabled === true;
+      byID('quality-probe-mode').value = config.quality_probe_mode;
       byID('quality-probe-prompt').value = config.quality_probe_prompt;
       byID('quality-probe-accept').value = config.quality_probe_accept;
       byID('gateway-policy').value = config.gateway_policy;
@@ -656,7 +630,7 @@
       Object.keys(numberIDs).forEach(function (key) { byID(numberIDs[key]).value = config[key]; });
       accounts = config.accounts;
       renderAccounts();
-      renderTicketMode();
+      renderCaptureMode();
       dirty = false;
       updateSaveState();
     }
@@ -665,8 +639,8 @@
         enabled: byID('enabled').checked,
         upstream_proxy_id: 0,
         upstream_proxy_url: byID('upstream-proxy-url').value.trim(),
-        dynamic_proxy_url: byID('dynamic-proxy-url').value.trim(),
-        ticket_mode: byID('ticket-mode').value,
+        dynamic_proxy_url: '',
+        ticket_mode: 'cookie',
         cookie_capture_mode: byID('cookie-capture-mode').value,
         cookie_capture_proxy_url: byID('cookie-capture-proxy-url').value.trim(),
         cookie_business_proxy_url: byID('cookie-business-proxy-url').value.trim(),
@@ -674,10 +648,11 @@
         proxy_generator_url: byID('proxy-generator-url').value.trim(),
         proxy_generator_blocked_countries: byID('proxy-generator-blocked-countries').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean),
         prefer_previous_ip: byID('prefer-previous-ip').checked,
-        allow_state_780: byID('allow-state-780').checked,
+        allow_state_780: true,
         route_cookie_reuse: byID('route-cookie-reuse').checked,
         mint_fingerprint_convergence: byID('mint-fingerprint-convergence').checked,
-        quality_probe_enabled: byID('quality-probe-enabled').checked,
+        quality_probe_enabled: byID('quality-probe-mode').value !== 'off',
+        quality_probe_mode: byID('quality-probe-mode').value,
         quality_probe_prompt: byID('quality-probe-prompt').value,
         quality_probe_accept: byID('quality-probe-accept').value,
         gateway_policy: byID('gateway-policy').value,
@@ -689,10 +664,13 @@
         const raw = byID(numberIDs[key]).value.trim();
         config[key] = raw === '' ? NaN : Number(raw);
       });
+      config.ttl_minutes = DEFAULT_CONFIG.ttl_minutes;
+      config.refresh_before_seconds = DEFAULT_CONFIG.refresh_before_seconds;
+      config.state_780_ttl_seconds = config.cookie_ticket_ttl_seconds;
       config.accounts = accounts.map(function (account) { return {
         account_id: account.account_id, name: accountText(account.name, 'name'), email: accountText(account.email, 'email'),
         expires_at: accountText(account.expires_at, 'expires_at'), quota: accountText(account.quota, 'quota'),
-        enabled: account.enabled, egress_mode: account.egress_mode, sticky_proxy_url: account.sticky_proxy_url,
+        enabled: account.enabled, egress_mode: 'sub2', sticky_proxy_url: '',
         plan: account.plan, request_timezone: accountText(account.request_timezone, 'request_timezone'), models: account.models.slice()
       }; });
       return validateConfig(config);
@@ -713,8 +691,12 @@
         const model = typeof ticket.model === 'string' && MODEL_PATTERN.test(ticket.model) ? ticket.model : '未知模型';
         account.appendChild(element('span', '账号：' + id + (info.name ? ' · ' + info.name : ''), 'status-account'));
         account.appendChild(element('span', '模型：' + model, 'status-model')); row.appendChild(account);
-        const plan = ticket.plan === 'team' ? 'Team · 332' : ticket.plan === 'pro' ? 'Pro · 292' : '—';
-        row.appendChild(element('td', plan + ' · ' + (ticket.ticket_mode === 'cookie' ? 'Cookie 分流' : '旧模式')));
+        const plan = ticket.plan === 'team' ? 'Team' : ticket.plan === 'pro' ? 'Pro' : '—';
+        row.appendChild(element('td', plan + ' · Cookie/780'));
+        const quality = ticket.quality_status === 'provisional' ? '临时票 · 未通过质量' : '严格合格';
+        const qualityCell = element('td');
+        qualityCell.appendChild(element('span', quality, 'badge ' + (ticket.quality_status === 'provisional' ? 'warning' : 'success')));
+        row.appendChild(qualityCell);
         const state = stateLabel(ticket.state); const stateCell = element('td');
         stateCell.appendChild(element('span', state[0], 'badge ' + state[1])); row.appendChild(stateCell);
         const remaining = element('td', remainingText(ticket.remaining_seconds));
@@ -828,11 +810,10 @@
     }
     byID('config-form').addEventListener('input', markDirty);
     byID('config-form').addEventListener('change', markDirty);
-    byID('ticket-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
-    byID('cookie-capture-mode').addEventListener('change', function () { renderTicketMode(); markDirty(); });
-    byID('standby-ticket-enabled').addEventListener('change', function () { renderTicketMode(); markDirty(); });
+    byID('cookie-capture-mode').addEventListener('change', function () { renderCaptureMode(); markDirty(); });
+    byID('standby-ticket-enabled').addEventListener('change', function () { renderCaptureMode(); markDirty(); });
     byID('gateway-policy').addEventListener('change', function () { renderGatewayPolicy(); markDirty(); });
-    byID('quality-probe-enabled').addEventListener('change', function () { renderQualityProbe(); markDirty(); });
+    byID('quality-probe-mode').addEventListener('change', function () { renderQualityProbe(); markDirty(); });
     async function saveConfig(event) {
       event.preventDefault(); if (busy || !loaded) return;
       let config;
@@ -870,11 +851,6 @@
     });
     byID('manual-account-id').addEventListener('keydown', function (event) {
       if (event.key === 'Enter') { event.preventDefault(); byID('add-account').click(); }
-    });
-    byID('toggle-proxy').addEventListener('click', function () {
-      const input = byID('dynamic-proxy-url'); const reveal = input.type === 'password';
-      input.type = reveal ? 'text' : 'password'; byID('toggle-proxy').textContent = reveal ? '隐藏' : '显示';
-      byID('toggle-proxy').setAttribute('aria-pressed', String(reveal));
     });
     byID('toggle-upstream-proxy').addEventListener('click', function () {
       const input = byID('upstream-proxy-url'); const reveal = input.type === 'password';
